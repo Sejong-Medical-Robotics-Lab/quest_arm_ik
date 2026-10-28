@@ -1,0 +1,299 @@
+# 삼현 2세대 상반신 (SH-Humanoid 저장소: urdf_moveit/SH_Humanoid_v2_description) 프로필.
+# 팀 약속 유지: 단위 m/rad, 기준 좌표 base_link(+X 오른쪽, +Y 정면, +Z 위), 관절 순서
+#   shoulder_pitch, shoulder_roll, shoulder_yaw, elbow, wrist_yaw, wrist_roll, wrist_pitch (실기체 축 순서 — 2026-10-23 손목 roll(6축)→pitch(7축) 로 확정; 팀 ros2_controllers.yaml 은 pitch, roll 순),
+#   손 프레임 left_hand_link / right_hand_link (SRDF tip_link), 준비 자세 teleop_ready = [0,0,0,-1.2,0,0.3,0].
+# 손: SH_Humanoid_v2.xacro 기본은 Unitree G1 Dex3-1 3지 핸드(전시 사양). 박스 손은 launch hand:=box (= dual_arm_ik/mujoco_sim 파라미터 xacro_args: "hand:=box").
+#   손 프레임(플랜지)은 두 손이 같아 아래 설정은 그대로 쓴다.
+#
+# 모델 경로는 launch 인자 model_path 로 전달 (xacro 그대로 가능):
+#   model_path:=$ISAAC_ROS_WS/src/SH-Humanoid/urdf_moveit/SH_Humanoid_v2_description/urdf/SH_Humanoid_v2.xacro
+# package_dirs 에는 SH_Humanoid_v2_description 이 들어 있는 디렉터리(urdf_moveit)를 적는다.
+
+quest_bridge:
+  ros__parameters:
+    input_mode: shpose_udp             # launch 의 input:= 가 덮어씀
+    output_frame_id: base_link
+    stream_timeout: 0.3                # on_stream 엔게이지: 이 시간 안에 패킷이 오면 engaged (Unity 는 그립 중에만 송신)
+    report_period: 0.0                 # 0 = 입력 시작/중단 전환 때만 로그. 10.0 이면 10 초마다 L/R 입력률도 출력
+    no_input_after: 5.0                # 입력이 이 시간[s] 이상 끊기면 한 번 경고 (0 = 경고 안 함)
+    # ---- shpose_udp: Unity ControllerPoseLogger.cs (SHPOSE,1,{L|R},t,x,y,z,qx,qy,qz,qw) ----
+    shpose_udp_port: 15000
+    # ---- shabs_udp: Unity AbsolutePoseSender.cs (SHABS,1,t,head(7),gripL,left(7),gripR,right(7)) ----
+    shabs_udp_port: 15001
+    # ---- team_topics: 팀 udp_pose_bridge 가 발행하는 /teleop/{left,right}_wrist_pose ----
+    left_wrist_pose_topic: /teleop/left_wrist_pose
+    right_wrist_pose_topic: /teleop/right_wrist_pose
+    # ---- xr_teleop: Isaac ROS 4.6 isaac_ros_teleop (/xr_teleop/*) — launch input:=xr_teleop 이 engage grip·요 90° 를 자동 설정 ----
+    ee_poses_topic: /xr_teleop/ee_poses
+    ee_poses_order: [left, right]
+    controller_data_topic: /xr_teleop/controller_data
+    left_engage_key: left_squeeze_value    # 그립 버튼 0~1 (트리거: left_trigger_value)
+    right_engage_key: right_squeeze_value
+    engage_threshold: 0.5
+    xr_pose_source: ee_poses
+    xr_controller_pose: grip
+    # ---- 공통: 입력 좌표계. Unity 쪽이 이미 base_link 축으로 변환해서 보내므로 ros(=그대로) ----
+    input_convention: ros              # pose_joy 로 Unity 원시값을 받을 때만 unity_sh (RobotBaseLinkCoordinates.cs 와 동일 변환)
+    engage_mode: on_stream             # on_stream(Unity SHPOSE) | grip(shabs, xr_teleop) | always
+
+dual_arm_ik:
+  ros__parameters:
+    model_path: ""                     # launch 인자 model_path 로 전달 (.xacro/.urdf)
+    package_dirs: [""]                 # launch 인자 package_dirs 로 전달 (예: [/abs/SH-Humanoid/urdf_moveit])
+    srdf_path: ""                      # launch 인자 srdf_path 로 전달 (SH_Humanoid_v2_moveit_config/config/SH_Humanoid_v2.srdf)
+    base_frame: base_link
+    forward_axis: [0.0, 1.0, 0.0]              # 베이스 프레임의 '정면' 방향 (검사·mock 입력용). SH base_link 는 +Y 가 정면
+
+    # ---- 로봇 ----
+    controlled_joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_yaw_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_yaw_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+    left_hand_frame: left_hand_link
+    right_hand_frame: right_hand_link
+    # 영공간 자세 = 조작자가 그립을 쥐는 '팔을 옆으로 내린' 자세 (팔꿈치 -0.3 만 굽힘, 손목 0). v0.7.35 — 이전 값(팀 teleop_ready: 팔꿈치 -1.2, 손목 pitch 0.3)은
+    # 그립만 쥐고 가만히 있어도 자세 과제가 팔꿈치를 3 s 에 13° 굽히고(어깨가 반대로 돌아 손은 그대로) 손목을 0.3 쪽으로 끌었다. 모델 계산: 자연스럽게 내린 팔 → 드리프트 0.4°
+    nominal_posture: [0.0, 0.0, 0.0, -0.3, 0.0, 0.0, 0.0,
+                     0.0, 0.0, 0.0, -0.3, 0.0, 0.0, 0.0]
+    # 관절별 posture 가중치 (어깨 roll/yaw 를 세게 잡아 팔꿈치가 벌어지지 않게; 손목 1.5 — 회전 추종이 꺼진 동안 손목이 중립을 지키게)
+    posture_weights: [0.1, 1.0, 1.0, 0.3, 1.5, 1.5, 1.5,
+                     0.1, 1.0, 1.0, 0.3, 1.5, 1.5, 1.5]
+
+    # ---- IK ----
+    control_rate: 100.0
+    solver: ""
+    position_cost: 1.0
+    orientation_cost: 0.15             # 회전 추종이 켜진 동안의 가중치 (orientation_clutch trigger 면 검지 트리거를 당긴 동안만). 손목 한계가 좁아(±1.4~1.6) 위치 우선
+    task_gain: 0.5                     # 시연 최종(v0.7.49): 0.5 — 목표에 지수적으로 다가가 멈춤이 부드럽다(0.8 은 속도 한계로 달리다 즉시 멈춰 스트리머가 v²/2a 지나침). 지연 +10 ms
+    lm_damping: 1.0e-3
+    posture_cost: 0.02                 # 팀 값
+    damping: 1.0e-4
+    max_joint_velocity: 1.5            # 팀 teleop_max_vel
+    limit_margin: 0.05                 # URDF 한계 안쪽 여유 (rad)
+    # IK 전용 관절 한계 (모델 한계보다 좁게). 팔꿈치: URDF 는 -2.618 까지지만 메시 기준 -1.9 부근부터 전완이 어깨 링크에 닿음
+    joint_limits_yaml: "{left_elbow_joint: [-1.8, 0.0], right_elbow_joint: [-1.8, 0.0]}"
+
+    # ---- 매핑·필터 ----
+    mapping_mode: relative             # relative: 그립 순간 로봇 손 기준 변화량 / absolute: 패킷 포즈(중립+변화량)를 그대로 목표로
+    translation_scale: 0.75            # = 로봇 팔 0.45 m(어깨→손 플랜지) / 조작자 어깨→손바닥 0.60 m. launch operator_arm:=<m> 을 주면 자동 계산.
+                                       # 팀 delta_scale 0.85 는 손끝 기준값 — 플랜지 기준으로는 커서 팔을 높이 들면 팔이 먼저 다 펴지고 손목이 꺾인다
+    quest_yaw_offset_deg: 0.0          # Unity 경로는 입력이 이미 base_link 축. xr_teleop 은 launch 가 90 (ROS x 정면 → SH y 정면) 으로 자동 설정
+    filter_min_cutoff: 1.5             # One-Euro 정지 시 차단 주파수 [Hz]. 현장 확정(2026-10-28, v0.7.57): 1.5/0.5 (≈100 ms) 가 가장 안정 — 조작자 손의 2~10 Hz 성분(드라이브 3~4 Hz 링잉을 키움)을 가장 많이 걸러냄.
+                                       # 2.0/1.0 은 지연 60~80 ms(v0.7.49 안), 5.0/10.0 은 지연 20 ms 지만 2~10 Hz 가 거의 그대로 통과(7차 npz). 더 민첩하게 3.0/2.0(≈40 ms)
+    filter_beta: 0.5                   # 속도 계수 [1/m]: 빨리 움직일수록 차단을 올림 (0.3 m/s 에서 +0.15 Hz)
+    orientation_filter_alpha: 0.3
+    input_timeout: 0.5
+    stop_on_release: true
+    # 회전 클러치 (v0.7.35): trigger = 검지 트리거(앞쪽 버튼, quest_bridge 가 /teleop/{side}_hand/grasp 로 0~1 발행)를 당긴 동안만 컨트롤러 회전을 따라가고,
+    #   그 외에는 손목 3관절을 잠근 채 위치만 추종 (손 방향은 전완을 따라감). 기준은 트리거를 당긴 순간. 당기지 않으면 손목이 전혀 움직이지 않는다.
+    #   로봇(상완 0.19·전완 0.27 m)과 사람의 팔 비율이 달라 손 방향을 늘 맞추면 손목이 저절로 꺾이는 것을 막는다. always = 그립 중 늘 추종(이전 동작).
+    #   Dex3 손을 같은 트리거로 쥘 때는 always 로 두거나 launch grasp:=false.
+    orientation_clutch: trigger
+    orient_trigger_threshold: 0.5
+    # 팔꿈치 힌트 (v0.7.38): 손 위치만 맞추면 팔꿈치 모양은 자세 과제가 정해 사람과 다르게 접힌다. 그립 순간 로봇 전완 방향을 기준으로 컨트롤러 회전 변화만큼
+    #   돌린 방향(≈ 조작자 전완 방향)으로 '손 목표 − 전완 길이' 점을 팔꿈치 위치 과제(가중 0.5, 손 1.0 대비)로 준다 → 팔꿈치가 사람 전완 방향을 따라간다.
+    #   trigger 모드에서 손목을 돌리는 동안은 끄고(컨트롤러 회전 ≠ 전완), 놓을 때 기준을 다시 잡는다. 0 = 끔
+    elbow_hint_cost: 0.0               # 현장 확정(2026-10-28): 끔 — 켜면(0.5) 팔꿈치가 조작자 전완 방향을 따라가 포즈는 닮지만(시뮬 45° → 21°) 실기체에서 덜 안정했다. 포즈 우선이면 0.5
+    forearm_filter_alpha: 0.1          # 팔꿈치 힌트 방향의 1차 저역 (τ ≈ 95 ms): 팔꿈치 스위블은 빠를 필요가 없고 컨트롤러 회전 잡음을 팔꿈치로 보내지 않게
+    max_step: 0.03                     # 한 주기 손 목표 이동 상한 [m] (팀 max_step; 튀는 패킷 방어)
+
+    # ---- 자기충돌 ----
+    enable_self_collision: true
+    collision_d_min: 0.03              # 팀 collision_margin
+    collision_gain: 0.3
+    collision_activation: 0.08
+    collision_convex_hull: true
+    # base_link.stl 은 21만 정점짜리 스탠드 전체라 convex hull 이 틀리고 MuJoCo 가 읽지 못함 → 팀 실측 기본도형으로 교체
+    # (pink_ik_bridge.py: 기둥 (0,0) r≈0.06 z 0.14~0.98, 어깨 바 ±0.135×±0.068 z 0.975~1.105, 바닥판 |x|<0.34 |y|<0.44 z<0.15)
+    collision_shapes_yaml: |
+      - {link: base_link, type: cylinder, size: [0.06, 0.85], xyz: [0.0, 0.0, 0.565], rpy: [0, 0, 0]}
+      - {link: base_link, type: box, size: [0.27, 0.136, 0.13], xyz: [0.0, 0.0, 1.04], rpy: [0, 0, 0]}
+      - {link: base_link, type: box, size: [0.68, 0.88, 0.30], xyz: [0.0, 0.0, 0.0], rpy: [0, 0, 0]}
+
+    # ---- I/O (팀 컨트롤러: ros2_controllers.yaml) ----
+    init_from_joint_states: true
+    joint_states_topic: /joint_states
+    output_mode: forward_position      # 팀 ready.sh 가 forward 컨트롤러로 전환해 둠. trajectory 면 *_arm_controller 로
+    output_split: true                 # 팔별 7축 메시지로 분리 발행
+    left_forward_position_topic: /left_arm_forward_controller/commands
+    right_forward_position_topic: /right_arm_forward_controller/commands
+    left_trajectory_topic: /left_arm_controller/joint_trajectory
+    right_trajectory_topic: /right_arm_controller/joint_trajectory
+    joint_state_out_topic: /teleop/joint_targets   # 팀 약속 토픽 (position=명령각, effort=중력보상 토크)
+    publish_gravity_ff: true
+    resync_threshold: 0.3              # rad, 내부 자세와 측정 관절각 차이가 이보다 크고
+    resync_ticks: 40                   #   이 주기 수만큼 지속되면 실제 각도로 재동기화 (팀 pink 브릿지와 동일)
+
+    # ---- 실기체 (integration/ros2_interfaces, HRController) ----
+    # 권장 경로(launch hr:=true): IK 는 output_mode: joint_state 로 /teleop/joint_targets 만 내고, 아래 upper_body_streamer 가 250 Hz 로
+    # UpperBodyCommand 를 보낸다. 측정값은 /upper_body/motor_state 를 관절각으로 변환해 받는다 (launch 가 joint_states_source 를 바꿈).
+    # (output_mode: upper_body 는 IK 가 100 Hz 로 직접 보내는 구버전 경로 — 스트리머가 있으면 쓰지 않는다)
+    joint_states_source: joint_states  # joint_states | upper_motor_state
+    upper_motor_state_topic: /upper_body/motor_states  # 드라이버의 UpperMotorState 토픽 (upper_body_streamer.motor_state_topic 과 같게)
+    upper_body_command_topic: /upper_body/command
+    upper_body_command_mode: 1
+    upper_body_kp: 30.0
+    upper_body_kd: 1.0
+    # 모터 ID ↔ 관절 매핑·부호·오프셋 (controlled_joints 순서). launch hr:=true 는 아래 upper_body_streamer 블록의 값을 이 노드에도 넘기므로
+    # 실측값은 upper_body_streamer 블록 한 곳만 고치면 된다 (여기 값은 launch 없이 노드를 단독 실행할 때만 쓰임).
+    motor_ids:     [34, 113, 125, 52, 105, 115, 57, 51, 32, 33, 31, 35, 36, 37]     # launch hr:=true 가 streamer 블록 값으로 덮어씀
+    joint_signs:   [1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0]   # 모터각 = sign*q + offset
+    joint_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+mujoco_sim:
+  ros__parameters:
+    model_path: ""                     # launch 가 model_path 를 그대로 전달
+    package_dirs: [""]
+    keyframe: ""                       # URDF 엔 키프레임 없음 → 0 자세에서 시작 (IK 가 teleop_ready 로 끌어감)
+    fix_base: true
+    controlled_joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_yaw_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_yaw_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+    pd_kp: 300.0                       # 링크 질량 ~1 kg, 팔 길이 0.45 m 기준
+    pd_kd: 10.0
+    collision_shapes_yaml: |
+      - {link: base_link, type: cylinder, size: [0.06, 0.85], xyz: [0.0, 0.0, 0.565], rpy: [0, 0, 0]}
+      - {link: base_link, type: box, size: [0.27, 0.136, 0.13], xyz: [0.0, 0.0, 1.04], rpy: [0, 0, 0]}
+      - {link: base_link, type: box, size: [0.68, 0.88, 0.30], xyz: [0.0, 0.0, 0.0], rpy: [0, 0, 0]}
+    # HRController 에뮬레이션 (launch hr:=true sim:=true): /upper_body/command 수신, /upper_body/motor_state·system_state 발행, enable/disable 서비스
+    hr_emulation: false                # launch hr:=true sim:=true 가 켬. hr_* 매핑도 launch 가 upper_body_streamer 블록 값으로 덮어씀
+    hr_motor_ids:     [34, 113, 125, 52, 105, 115, 57, 51, 32, 33, 31, 35, 36, 37]
+    hr_joint_signs:   [1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0]
+    hr_joint_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    hr_extra_motor_ids: [90]
+    hr_state_rate: 250.0
+    viewer: true
+    initial_posture: [0.0, 0.0, 0.0, -0.15, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.15, 0.0, 0.0, 0.0]   # 시작 자세 = 팔을 옆으로 내린 자세 (팔꿈치 0.15 rad 만 굽힘 — URDF 상한 -0.05 + limit_margin 0.05 안쪽: 손이 어깨 바로 아래 — 조작자의 내린 손과 같은 기준점.
+                                       # 0.35 였을 때는 손이 어깨보다 10 cm 앞에 있어 상대 매핑의 기준이 어긋나 팔을 들면 로봇 팔이 먼저 펴지고 손목이 꺾였다)
+                                       # 조작자도 팔을 내린 채 그립을 쥐고 시작. 팀 teleop_ready 로 시작하려면 [0,0,0,-1.2,0,0.3,0, 0,0,0,-1.2,0,0.3,0]
+    forward_axis: [0.0, 1.0, 0.0]      # 뷰어 카메라를 로봇 뒤(-Y)에 놓고 +Y 를 보게 (launch 가 덮어씀)
+    viewer_view: behind                # behind | front | default
+    realtime: 1.0
+    publish_rate: 100.0
+    joint_states_topic: /joint_states
+    # 시뮬이 듣는 명령 토픽 = dual_arm_ik 출력 (팔별)
+    left_forward_position_topic: /left_arm_forward_controller/commands
+    right_forward_position_topic: /right_arm_forward_controller/commands
+    left_trajectory_topic: /left_arm_controller/joint_trajectory
+    right_trajectory_topic: /right_arm_controller/joint_trajectory
+
+# 손 쥐기: 컨트롤러 검지 트리거(앞쪽 버튼) 0~1 → /teleop/{side}_hand/grasp → 손가락 관절 목표 /teleop/hand_joint_targets (JointState).
+# mujoco_sim 이 그 관절을 움직이고, 실기체는 Dex3 드라이버가 같은 토픽을 받으면 된다. 관절 이름은 G1 Dex3-1 (g1_with_hands.xml / dex3_hand.xacro) 공통.
+hand_grasp:
+  ros__parameters:
+    rate: 50.0
+    tau: 0.1                           # s, 트리거 저역통과 (쥐기/펴기가 이 시정수로 부드럽게)
+    targets_topic: /teleop/hand_joint_targets
+    hand_joints_yaml: |                # {side: {joint: [열림, 쥠]}} — Dex3-1 관절 범위 안 (왼손 검지·중지 −, 엄지 +; 오른손 반대). 열림은 살짝 오므린 자연스러운 자세
+      left:
+        left_hand_thumb_0_joint:  [0.0,  0.0]
+        left_hand_thumb_1_joint:  [0.6,  1.0]
+        left_hand_thumb_2_joint:  [0.4,  1.2]
+        left_hand_index_0_joint:  [-0.2, -1.3]
+        left_hand_index_1_joint:  [-0.3, -1.5]
+        left_hand_middle_0_joint: [-0.2, -1.3]
+        left_hand_middle_1_joint: [-0.3, -1.5]
+      right:
+        right_hand_thumb_0_joint:  [0.0,  0.0]
+        right_hand_thumb_1_joint:  [-0.6, -1.0]
+        right_hand_thumb_2_joint:  [-0.4, -1.2]
+        right_hand_index_0_joint:  [0.2,  1.3]
+        right_hand_index_1_joint:  [0.3,  1.5]
+        right_hand_middle_0_joint: [0.2,  1.3]
+        right_hand_middle_1_joint: [0.3,  1.5]
+
+# 실기체 스트리머: /teleop/joint_targets(IK 100 Hz) → /upper_body/command (250 Hz, 속도 피드포워드, 속도 제한, 워치독). launch hr:=true 가 띄움.
+hr_udp_relay:                        # 실기체 링크(udp): Thor 안의 릴레이 — /upper_body/* 토픽·서비스 ↔ 미니PC hr_udp_bridge.py (UDP 7001/7002)
+  ros__parameters:
+    peer_host: 192.168.10.2            # 미니PC eno1
+    peer_port: 7001
+    local_port: 7002
+    poll_rate: 200.0
+    hello_period: 1.0
+    state_timeout: 1.0
+    svc_timeout: 0.5
+
+upper_body_streamer:
+  ros__parameters:
+    controlled_joints:                  # dual_arm_ik.controlled_joints 와 같은 순서
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_yaw_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_yaw_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+    # ★ 모터 매핑의 원본 (실측 후 여기만 고친다: ros2 run quest_arm_ik motor_calib -- zero / jog N 0.1 → 출력된 값을 그대로)
+    #   launch hr:=true 가 dual_arm_ik 와 mujoco_sim(hr_*) 에도 같은 값을 넘긴다.
+    # 2026-10-20 실측 (손으로 움직이며 motor_states 관찰, 영점 = 양팔 곧게 내린 자세 = URDF 0 → offsets 0).
+    #   axis_map: 채널1 = 왼팔 axis1~7 (UID 34,113,125,52,105,115,57), 채널2 = 오른팔 axis8~14 (51,32,33,31,35,36,37), axis15(90) 미연결.
+    #   관절 대응: 어깨 pitch/roll/yaw, 팔꿈치, 손목 yaw(전완 회전) 는 axis 순서 그대로. 손목 나머지 둘은 축 방향으로 대응:
+    #   '손목 드는 것'(앞뒤 흔들림, 좌우축 회전) = URDF wrist_roll(축 -x) ← UID 115/36, '손목 바깥/안쪽 굽힘'(좌우 흔들림, 전후축 회전) = URDF wrist_pitch(축 ±y) ← UID 57/37.
+    #   2026-10-23 실기체 확인: 손목은 yaw(5축) → roll(6축, UID 115/36) → pitch(7축, UID 57/37) 순 — URDF 체인도 그 순서로 고침(SH-Humanoid_wrist_order.zip), 아래 목록·배열도 같은 순서.
+    #   부호 = 모터 + 방향 / URDF + 방향 (URDF: 어깨p + 앞으로 듦, 어깨r + 안쪽, 어깨y + 바깥 회전, 팔꿈치 + 폄, 손목y + 안쪽 회전, 손목p + 바깥 굽힘, 손목r + 뒤로).
+    #   왼팔 [+,+,+,-,-,-,-] / 오른팔 [-,-,-,+,+,+,+] 로 정확히 반대칭 — 거울 장착과 일치. 손목 둘(pitch/roll)은 jog 로 한 번 더 확인할 것(6-3 표).
+    motor_ids:     [34, 113, 125, 52, 105, 115, 57, 51, 32, 33, 31, 35, 36, 37]
+    joint_signs:   [1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0]
+    joint_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    extra_motor_ids: [0]               # 머리 90(미연결)은 보내지 않는다 (0 = 없음). 보내면 HRController 가 명령마다 SET_RUN_MODE+MOVE_TO_POS 2건을
+                                       # 거부하며 `[HR] event: command_commit_failed` 를 찍는다 (2026-10-21 현장 확인). 빈 슬롯은 255 로 채움(empty_slot_id)
+    empty_slot_id: 255
+    # 드라이버 토픽 이름 — 실제 HRController 가 내는 이름으로 맞춘다 (`ros2 topic list -t`, `ros2 node info /<드라이버 노드>`).
+    # 아래 dual_arm_ik.upper_motor_state_topic 도 같은 값으로.
+    motor_state_topic: /upper_body/motor_states      # 실제 hr_state_bridge 이름 (저장소 문서의 motor_state 가 아님)
+    system_state_topic: /upper_body/system_state
+    command_topic: /upper_body/command
+    rate: 100.0                        # Hz. IK(100 Hz) 와 1:1. 미니PC 배포 제어기(feature/100hz-control)는 OD 0x7016 을 축마다 200 Hz 슬롯에서 쓰므로
+                                       # 200 도 가능(verify --rate 200 으로 확인 뒤). zip 의 main 은 50 Hz 슬롯이라 그땐 50 이 상한이었음 (런북 6-1e). '멈췄다 점프' 는 6-1c
+    v_max: 0.4                         # rad/s — 현장 확정(2026-10-28) 0.4 (v0.7.49 안은 0.5): 드라이브 3~4 Hz 리플은 속도와 함께 커지고(1.0 에서 틱당 2배, 0.7 에서 1.5배) 포즈 모사엔 충분. launch hr:=true 는 이 값을 IK max_joint_velocity 로도 쓰고
+                                       # 스트리머에는 ×1.25 를 준다 (launch v_max:=0.3 으로 덮어쓰기). IK 가 더 빠르면 실기체가 뒤처져 IK 재동기화가 반복됨
+    a_max: 4.0                         # rad/s² — 드라이브 acc_set_pp 의 최솟값(어깨 4.0, 런북 6-1e) 이하로. 8.0 이면 어깨 드라이브가 가속 구간에서 뒤처졌다 따라잡기를 반복해
+                                       # 2~3 Hz 떨림(2026-10-26 v_max 0.7 '덜덜'). acc2 단계(어깨 6.0)면 6.0. 실행 중 변경: ros2 param set /upper_body_streamer a_max 4.0
+    v_catchup: 0.3                     # rad/s — 정지(미활성·HOLD·발행자 2개)에서 추종을 다시 시작할 때 목표까지 접근하는 속도 상한 (v0.7.55). 2026-10-28 enable 순간
+                                       # 쇼 목표가 1 rad 넘게 떨어져 있어 v_max 2.5 로 튐 → 멀리 있는 목표에는 이 속도로 천천히 가고, 닿으면 v_max. 0 = 끔(v_max)
+    hold_recover_time: 1.0             # s — 추종 오차 정지(명령을 측정값으로 되돌림) 뒤 다시 접근을 시작하기까지
+    max_tracking_retries: 3            # 목표에 닿지 못한 채 추종 오차 정지가 이 횟수면 정지 유지 — /teleop/hold 토글, disable→enable, 목표 복귀(IK 재동기화)로 해제
+    ik_timeout: 0.2                    # s, IK 목표가 끊기면 그 자리 정지
+    max_tracking_error: 0.35           # rad, 명령-측정 차이가 이보다 크면 정지 (충돌·모터 불능·매핑 오류)
+    command_mode: 1                    # 1 POSITION 고정: 삼현 브리지(ros2_state_bridge.py)가 1 과 6 만 받고 4/5 는 'position-only controller' 로 거부한다 (소스 확인 2026-10-20)
+    position_only: true                # kp/kd/effort 0: 실기체는 POSITION 모드 내부 게인으로 추종 (kp/kd 를 주면 움직임이 튐, 2026-10-20 실측)
+    velocity_feedforward: true         # 팀 trajectory_bridge 와 동일하게 velocity 에 보간 속도를 실음
+    kp: 20.0                           # position_only: false 일 때만 쓰임 (드라이버 단위)
+    kd: 0.5
+    extra_kp: 10.0
+    extra_kd: 0.3
+    effort_feedforward: false          # IMPEDANCE 에서 중력토크(effort) 피드포워드 — 단위·부호 확인 후 true
+    duration: -1.0                     # UpperBodyCommand.duration; -1 = 1/rate = 0.02. 드라이버는 이 값을 무시한다(jog --once --duration 2.0 실측) — 형식만 팀 브리지와 동일하게
+    require_enabled: true              # system_state ENABLED/RUNNING 일 때만 발행
+    command_reliability: reliable      # reliable 고정: 삼현 ros2_state_bridge.py 의 /upper_body/command 구독이 RELIABLE(depth 1) 이라 best_effort 발행은 짝이 안 맞는다 (소스 확인 2026-10-20)
+    publish_when_idle: true            # IK 가 없어도 현재 위치 유지 명령 유지 (드라이버 워치독)

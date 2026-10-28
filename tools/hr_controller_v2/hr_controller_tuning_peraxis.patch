@@ -1,0 +1,83 @@
+hr_controller 추가 패치 v2.2 — 축별 position_tuning (2026-10-23). v2.1(hr_controller_demo.patch) 이 적용된 ~/hr_controller 위에 덧붙인다.
+================================================================================================================
+왜: enable 로그의 드라이버 값이 축마다 다르다 (예: axis 9 loc_kp 11.7, axis 2 14.6, axis 10 0.57; acc_set_pp 2.0 rad/s²).
+    전역 position_tuning 하나로 덮으면 축별 차이가 사라지므로, config 의 axes 항목마다 같은 키로 덮어쓸 수 있게 한다.
+바뀌는 것 (2파일): include/hr/config/hr_config.hpp (axes[i] 에 limit_spd_rad_s / loc_kp / vel_max_pp_rad_s / acc_set_pp_rad_s2 선택 키,
+    전역값과 합치는 resolve_tuning), src/main.cpp (축마다 합친 값을 넘기고 시작 로그에 "[HR] axis n position_tuning on enable: …" 출력).
+우선순위: 축 항목 값 > 전역 position_tuning 값 > 0(드라이버 값 유지).
+
+미니PC:
+  scp sejong@192.168.10.1:~/workspaces/isaac_ros-dev/src/quest_arm_ik/tools/hr_controller_v2/hr_controller_tuning_peraxis.patch ~/
+  cd ~/hr_controller && git apply --check ~/hr_controller_tuning_peraxis.patch && git apply ~/hr_controller_tuning_peraxis.patch
+  cmake --build build/release        # tty1 Ctrl-C → ./run_hr_controller.sh > ~/hr.log 2>&1
+되돌리기: git apply -R ~/hr_controller_tuning_peraxis.patch && cmake --build build/release
+
+config 예 (config/hr_controller.yaml; 값은 enable 로그 "OD 0x70.." 의 현재값을 보고 정한다):
+  position_tuning:            # 전역 (모든 축)
+    acc_set_pp_rad_s2: 8.0    # 드라이버 2.0 → 스트리머 a_max(8) 와 같게
+  axes:
+    - axis_id: 4              # 기존 항목에 키만 추가
+      ...
+      loc_kp: 24.0            # 이 축만 (현재값 × 2 정도부터)
+적용 확인: 재시작 로그 "[HR] axis 4 position_tuning on enable: … loc_kp=24 …", enable 뒤 "[Axis 4] OD 0x701E loc_kp = 24.0000" (read-back).
+
+diff --git a/include/hr/config/hr_config.hpp b/include/hr/config/hr_config.hpp
+index e654651..da23c16 100644
+--- a/include/hr/config/hr_config.hpp
++++ b/include/hr/config/hr_config.hpp
+@@ -86,8 +86,21 @@ struct AxisCalib {
+     bool     invert{false};             // invert direction
+     double   position_limit_min_rad{-12.5 * 3.14159265358979323846}; // joint min [rad]
+     double   position_limit_max_rad{ 12.5 * 3.14159265358979323846}; // joint max [rad]
++    // Per-axis position-loop tuning (0 = use the global position_tuning value; that 0 = keep the drive's value)
++    PositionTuningConfig tuning{};
+ };
+ 
++// Global value unless the axis entry overrides it (either 0 = leave the drive's value alone).
++inline PositionTuningConfig resolve_tuning(const PositionTuningConfig& global_tuning, const PositionTuningConfig& axis_tuning) noexcept
++{
++    PositionTuningConfig out = global_tuning;
++    if (axis_tuning.limit_spd_rad_s > 0.0f)   { out.limit_spd_rad_s   = axis_tuning.limit_spd_rad_s; }
++    if (axis_tuning.loc_kp > 0.0f)            { out.loc_kp            = axis_tuning.loc_kp; }
++    if (axis_tuning.vel_max_pp_rad_s > 0.0f)  { out.vel_max_pp_rad_s  = axis_tuning.vel_max_pp_rad_s; }
++    if (axis_tuning.acc_set_pp_rad_s2 > 0.0f) { out.acc_set_pp_rad_s2 = axis_tuning.acc_set_pp_rad_s2; }
++    return out;
++}
++
+ // ---------------------------------------------------------------------------
+ // Root config object — loaded from YAML
+ // ---------------------------------------------------------------------------
+@@ -193,6 +206,11 @@ struct HrConfig {
+                 } else if (entry["position_limit_max_rad"]) {
+                     a.position_limit_max_rad = entry["position_limit_max_rad"].as<double>();
+                 }
++                // per-axis tuning override (same keys as the global position_tuning block)
++                if (entry["limit_spd_rad_s"])   a.tuning.limit_spd_rad_s   = entry["limit_spd_rad_s"].as<float>();
++                if (entry["loc_kp"])            a.tuning.loc_kp            = entry["loc_kp"].as<float>();
++                if (entry["vel_max_pp_rad_s"])  a.tuning.vel_max_pp_rad_s  = entry["vel_max_pp_rad_s"].as<float>();
++                if (entry["acc_set_pp_rad_s2"]) a.tuning.acc_set_pp_rad_s2 = entry["acc_set_pp_rad_s2"].as<float>();
+             }
+         }
+ 
+diff --git a/src/main.cpp b/src/main.cpp
+index 6f80b13..4c81bb7 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1050,7 +1050,16 @@ int main(int argc, char* argv[])
+                 cfg.axes[axis_id - 1u].position_limit_max_rad,
+                 can_queues,
+                 snapshot_stores[axis_id - 1u]);
+-            axis_units[axis_id - 1u]->set_position_tuning(cfg.position_tuning);
++            {
++                const hr::PositionTuningConfig tuning = hr::resolve_tuning(cfg.position_tuning, cfg.axes[axis_id - 1u].tuning);
++                axis_units[axis_id - 1u]->set_position_tuning(tuning);
++                if (tuning.limit_spd_rad_s > 0.0f || tuning.loc_kp > 0.0f || tuning.vel_max_pp_rad_s > 0.0f || tuning.acc_set_pp_rad_s2 > 0.0f) {
++                    std::cout << "[HR] axis " << static_cast<unsigned>(axis_id) << " position_tuning on enable:"
++                              << " limit_spd=" << tuning.limit_spd_rad_s << " loc_kp=" << tuning.loc_kp
++                              << " vel_max_pp=" << tuning.vel_max_pp_rad_s << " acc_set_pp=" << tuning.acc_set_pp_rad_s2
++                              << " (0 = keep drive value)\n";
++                }
++            }
+             IROBE_ERROR_CHECK(runtime.components().register_unit(axis_units[axis_id - 1u]));
+         }
+     }

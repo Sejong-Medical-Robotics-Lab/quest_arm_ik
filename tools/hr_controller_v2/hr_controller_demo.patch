@@ -1,0 +1,1068 @@
+hr_controller 시연용 패치 v2.1 (2026-10-22; v2.2 = + hr_controller_tuning_peraxis.patch 축별 튜닝) — 미니PC 배포 소스 기준 (브랜치 feature/100hz-control, HEAD f29a434), `git apply` 한 번
+===========================================================================================================
+※ v2(7/1 zip 기준)는 미니PC 소스와 세 파일이 달라 적용되지 않았음. 미니PC 소스(minipc_src.tgz)로 다시 만든 것이 이 파일.
+   미니PC 브랜치는 이미 CAN 지령 쓰기가 CAN_CTRL_HZ = 200 Hz 이고 "[IPC] MoveToPos" 로그도 없으므로 그 두 변경은 뺐다.
+
+바뀌는 것 (7파일; 제어기 본체·CAN·FSM·지령 주기(200 Hz) 는 그대로):
+  1. Thor 직결 UDP 링크 내장  (include/hr/udp/hr_udp_link.hpp, src/udp/hr_udp_link.cpp — 새 파일; src/main.cpp)
+     - 0.0.0.0:7001 에서 quest_arm_ik hr_udp_relay 의 CMD/SVC/HELLO 를 받고, STATE 를 100 Hz 로 보낸다.
+       미니PC 의 파이썬 브리지(ros2_state_bridge.py / hr_udp_bridge.py)·IPC·JSON 파일을 거치지 않는다.
+     - 모든 링크 명령은 기존 IPC 패킷(IpcCommandPacket)으로 바꿔 dispatch_ipc_command() 로 보낸다 — 코디네이터·축 유닛은 무수정.
+     - 메인 루프: 5 ms sleep → poll(1 ms). IPC 소켓·상태 JSON(100 ms) 은 그대로라 삼현 도구들도 그대로 돈다.
+  2. enable 때 위치 루프 OD 튜닝 (config position_tuning: limit_spd/loc_kp/vel_max_pp/acc_set_pp, 0 = 유지) 쓰고,
+     네 값을 읽어 로그에 "[Axis n] OD 0x7017 limit_spd = …" 로 남긴다 (include/hr/config/hr_config.hpp, axis_unit.*).
+  3. CMakeLists.txt 에 src/udp/hr_udp_link.cpp 추가.
+config/hr_controller.yaml 은 손대지 않는다 — 생략된 키는 기본값(udp_link enabled, 7001, 100 Hz; 튜닝 0 = 유지).
+
+미니PC 에서 (samhyun, ~/hr_controller) — 미니PC 가 Thor 호스트에서 파일을 가져온다:
+  scp sejong@192.168.10.1:~/workspaces/isaac_ros-dev/src/quest_arm_ik/tools/hr_controller_v2/hr_controller_demo.patch ~/
+  cd ~/hr_controller
+  git status --short src include CMakeLists.txt     # 아무것도 안 나와야 함
+  git apply --check ~/hr_controller_demo.patch      # 아무 출력 없으면 OK
+  git apply ~/hr_controller_demo.patch
+  git diff --stat                                   # 5 files changed (+ 새 파일 2개는 git status 에 ??)
+  cmake --build build/release                       # 수십 초. 빌드 환경은 이미 있음 (/usr/bin/c++, ninja, /opt/irobe/0.1.0, yaml-cpp)
+  # tty1 의 hr_controller 를 Ctrl-C 로 끝내고  ./run_hr_controller.sh > ~/hr.log 2>&1
+  # tty2 의 파이썬 브리지는 띄우지 않는다 (7001 포트를 제어기가 쓴다 — 둘 다 띄우면 나중 것이 bind 실패로 끝남)
+되돌리기:  cd ~/hr_controller && git apply -R ~/hr_controller_demo.patch && cmake --build build/release   (config 는 건드리지 않음)
+
+확인 (tty2: tail -F ~/hr.log):
+  [HR]   CAN TX rate  : 200 Hz  (divider=5)                    ← 이 브랜치 원래 값 (지령 쓰기 슬롯)
+  [HR-UDP] listening on 0.0.0.0:7001, STATE 100 Hz → peer (none)
+  [HR-UDP] peer 192.168.10.1:7002 registered (HELLO)           ← Thor 에서 hr_udp_relay 를 띄우면
+  [HR-UDP] peer=192.168.10.1:7002 cmd 100/s (entries 1400/s, dispatched 1400/s, skipped_disabled 0, unknown_motor 0, bad_mode 0) svc 0 state 100/s bad 0 tx_fail 0
+  [Axis 4] OD 0x7017 limit_spd = …  (enable 때 축마다 4줄: 드라이버의 현재 튜닝값)
+  [HR] CAN frames(10s) ch1 tx=… (+14000) rx=… (+14000) | ch2 …   ← 이 브랜치에 원래 있는 10 s 집계: 7축 × 200 Hz × 10 s. idle 이든 명령 중이든 같다
+Thor: config/sh_humanoid_v2.yaml 의 upper_body_streamer.rate: 100.0 (IK 와 1:1), verify 는 --rate 100. 슬롯이 200 Hz 라 --rate 200 도 시험 가능.
+
+선택 설정 (config/hr_controller.yaml 끝에 덧붙임):
+  udp_link:
+    enabled: true            # false 면 종전처럼 파이썬 브리지 사용
+    listen_port: 7001
+    state_rate_hz: 100
+    # peer_host: 192.168.10.1   # 비우면 Thor 의 HELLO 로 자동 등록
+  position_tuning:           # 0 = 드라이버 값 유지. 먼저 로그에 찍힌 현재값을 보고 정한다
+    limit_spd_rad_s: 0
+    loc_kp: 0
+    vel_max_pp_rad_s: 0
+    acc_set_pp_rad_s2: 0
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fa4027d..74ccb7c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -80,6 +80,7 @@ add_executable(hr_controller
+     src/can/can_channel_process.cpp
+     src/can/ethernet_can_adapter.cpp
+     src/axis/axis_unit.cpp
++    src/udp/hr_udp_link.cpp
+     src/coordinator/hr_coordinator.cpp
+     src/ros2/upper_body_motor_driver_node.cpp
+     src/ros2/upper_body_controller_node.cpp
+diff --git a/include/hr/axis/axis_unit.hpp b/include/hr/axis/axis_unit.hpp
+index f7f296b..814837a 100644
+--- a/include/hr/axis/axis_unit.hpp
++++ b/include/hr/axis/axis_unit.hpp
+@@ -36,6 +36,10 @@ public:
+     [[nodiscard]] uint8_t axis_id()    const noexcept { return axis_id_; }
+     [[nodiscard]] uint8_t channel_id() const noexcept { return channel_id_; }
+ 
++    // Optional position-loop OD tuning, written on every Enable (0 = keep the drive's value).
++    // Call before runtime.start(); the values are only read from the RT thread afterwards.
++    void set_position_tuning(const PositionTuningConfig& tuning) noexcept { tuning_ = tuning; }
++
+     bool update_unit() override;
+ 
+ private:
+@@ -49,6 +53,7 @@ private:
+     void apply_safe_hold() noexcept;
+     void issue_disable_sequence() noexcept;
+     void apply_run_mode(uint32_t mode) noexcept;
++    void apply_position_tuning() noexcept;   // OD writes (configured ones) + read-back of all tuning indices
+     void zero_non_impedance_targets() noexcept;
+     float clamp_target_position(float position) const noexcept;
+ 
+@@ -110,6 +115,7 @@ private:
+     uint16_t     od_readback_index_{0u};
+     uint32_t     od_readback_request_cycle_{0u};
+     float        od_readback_expected_f32_{0.0f};
++    PositionTuningConfig tuning_{};
+ 
+     // Impedance / position targets (updated by RT commands)
+     float target_pos_{0.0f};      // [rad]
+diff --git a/include/hr/config/hr_config.hpp b/include/hr/config/hr_config.hpp
+index 709dcb6..da23c16 100644
+--- a/include/hr/config/hr_config.hpp
++++ b/include/hr/config/hr_config.hpp
+@@ -46,6 +46,33 @@ struct CoordinatorConfig {
+     bool     auto_enable{false};             // automatically EnableAll when READY
+ };
+ 
++// ---------------------------------------------------------------------------
++// Direct UDP link to the teleoperation host (quest_arm_ik `hr_udp_relay`).
++// Enabled by default; set `udp_link: {enabled: false}` to fall back to the
++// Python bridges (tools/hr_udp_bridge.py / ros2_state_bridge.py).
++// ---------------------------------------------------------------------------
++struct UdpLinkConfig {
++    bool        enabled{true};
++    std::string bind_addr{"0.0.0.0"};     // local interface (0.0.0.0 = all)
++    uint16_t    listen_port{7001};         // CMD/SVC/HELLO arrive here
++    std::string peer_host{};               // empty = learn the host from its HELLO packets
++    uint16_t    peer_port{7002};           // STATE/ACK go here (only used with peer_host)
++    uint32_t    state_rate_hz{100};        // STATE packets per second
++    uint32_t    peer_timeout_ms{3000};     // forget a learned peer after this silence
++};
++
++// ---------------------------------------------------------------------------
++// Position-loop OD tuning written to every axis on each Enable (0 = keep the
++// drive's own value).  The drive's values are read back and logged on Enable
++// regardless, so the defaults can be seen in the log.
++// ---------------------------------------------------------------------------
++struct PositionTuningConfig {
++    float limit_spd_rad_s{0.0f};   // OD 0x7017 limit_spd  [rad/s]  (velocity / PP trajectory limit)
++    float loc_kp{0.0f};            // OD 0x701E loc_kp      position-loop gain
++    float vel_max_pp_rad_s{0.0f};  // OD 0x7024 vel_max(PP) [rad/s]
++    float acc_set_pp_rad_s2{0.0f}; // OD 0x7025 acc_set(PP) [rad/s²]
++};
++
+ // ---------------------------------------------------------------------------
+ // Axis calibration — applied per logical axis to convert counts ↔ radians
+ // ---------------------------------------------------------------------------
+@@ -59,14 +86,29 @@ struct AxisCalib {
+     bool     invert{false};             // invert direction
+     double   position_limit_min_rad{-12.5 * 3.14159265358979323846}; // joint min [rad]
+     double   position_limit_max_rad{ 12.5 * 3.14159265358979323846}; // joint max [rad]
++    // Per-axis position-loop tuning (0 = use the global position_tuning value; that 0 = keep the drive's value)
++    PositionTuningConfig tuning{};
+ };
+ 
++// Global value unless the axis entry overrides it (either 0 = leave the drive's value alone).
++inline PositionTuningConfig resolve_tuning(const PositionTuningConfig& global_tuning, const PositionTuningConfig& axis_tuning) noexcept
++{
++    PositionTuningConfig out = global_tuning;
++    if (axis_tuning.limit_spd_rad_s > 0.0f)   { out.limit_spd_rad_s   = axis_tuning.limit_spd_rad_s; }
++    if (axis_tuning.loc_kp > 0.0f)            { out.loc_kp            = axis_tuning.loc_kp; }
++    if (axis_tuning.vel_max_pp_rad_s > 0.0f)  { out.vel_max_pp_rad_s  = axis_tuning.vel_max_pp_rad_s; }
++    if (axis_tuning.acc_set_pp_rad_s2 > 0.0f) { out.acc_set_pp_rad_s2 = axis_tuning.acc_set_pp_rad_s2; }
++    return out;
++}
++
+ // ---------------------------------------------------------------------------
+ // Root config object — loaded from YAML
+ // ---------------------------------------------------------------------------
+ struct HrConfig {
+     EthernetCanConfig  ethernet_can{};
+     CoordinatorConfig  coordinator{};
++    UdpLinkConfig      udp_link{};
++    PositionTuningConfig position_tuning{};
+ 
+     // Per-axis calibration; indexed by axis_id-1.
+     // Entries missing from YAML keep defaults.
+@@ -122,6 +164,25 @@ struct HrConfig {
+             if (n["auto_enable"])          cfg.coordinator.auto_enable          = n["auto_enable"].as<bool>();
+         }
+ 
++        // ---- udp_link -------------------------------------------------------
++        if (const auto n = root["udp_link"]) {
++            if (n["enabled"])         cfg.udp_link.enabled         = n["enabled"].as<bool>();
++            if (n["bind_addr"])       cfg.udp_link.bind_addr       = n["bind_addr"].as<std::string>();
++            if (n["listen_port"])     cfg.udp_link.listen_port     = n["listen_port"].as<uint16_t>();
++            if (n["peer_host"])       cfg.udp_link.peer_host       = n["peer_host"].as<std::string>();
++            if (n["peer_port"])       cfg.udp_link.peer_port       = n["peer_port"].as<uint16_t>();
++            if (n["state_rate_hz"])   cfg.udp_link.state_rate_hz   = n["state_rate_hz"].as<uint32_t>();
++            if (n["peer_timeout_ms"]) cfg.udp_link.peer_timeout_ms = n["peer_timeout_ms"].as<uint32_t>();
++        }
++
++        // ---- position_tuning (all axes) ------------------------------------
++        if (const auto n = root["position_tuning"]) {
++            if (n["limit_spd_rad_s"])    cfg.position_tuning.limit_spd_rad_s    = n["limit_spd_rad_s"].as<float>();
++            if (n["loc_kp"])             cfg.position_tuning.loc_kp             = n["loc_kp"].as<float>();
++            if (n["vel_max_pp_rad_s"])   cfg.position_tuning.vel_max_pp_rad_s   = n["vel_max_pp_rad_s"].as<float>();
++            if (n["acc_set_pp_rad_s2"])  cfg.position_tuning.acc_set_pp_rad_s2  = n["acc_set_pp_rad_s2"].as<float>();
++        }
++
+         // ---- axes -----------------------------------------------------------
+         if (const auto axes_node = root["axes"]) {
+             for (const auto& entry : axes_node) {
+@@ -145,6 +206,11 @@ struct HrConfig {
+                 } else if (entry["position_limit_max_rad"]) {
+                     a.position_limit_max_rad = entry["position_limit_max_rad"].as<double>();
+                 }
++                // per-axis tuning override (same keys as the global position_tuning block)
++                if (entry["limit_spd_rad_s"])   a.tuning.limit_spd_rad_s   = entry["limit_spd_rad_s"].as<float>();
++                if (entry["loc_kp"])            a.tuning.loc_kp            = entry["loc_kp"].as<float>();
++                if (entry["vel_max_pp_rad_s"])  a.tuning.vel_max_pp_rad_s  = entry["vel_max_pp_rad_s"].as<float>();
++                if (entry["acc_set_pp_rad_s2"]) a.tuning.acc_set_pp_rad_s2 = entry["acc_set_pp_rad_s2"].as<float>();
+             }
+         }
+ 
+diff --git a/include/hr/udp/hr_udp_link.hpp b/include/hr/udp/hr_udp_link.hpp
+new file mode 100644
+index 0000000..dcd6301
+--- /dev/null
++++ b/include/hr/udp/hr_udp_link.hpp
+@@ -0,0 +1,165 @@
++#pragma once
++// ---------------------------------------------------------------------------
++// hr::udp::Link — direct UDP link between hr_controller and the Jetson
++// (quest_arm_ik `hr_udp_relay`).  Replaces the Python ros2_state_bridge /
++// hr_udp_bridge path for the teleoperation host: no JSON file, no IPC hop,
++// no DDS on the cable.
++//
++// Wire protocol (little-endian, every packet fits one Ethernet frame):
++//   HELLO  host → ctrl  'HRUH' ver u16, seq u32                          (peer registration, ~1 Hz)
++//   CMD    host → ctrl  'HRUC' ver u16, seq u32, mode u8, n u8, n×(motor_id u8, position f32)
++//   SVC    host → ctrl  'HRUS' ver u16, seq u32, svc u16, motor_id u8, pad u8, value f32
++//   ACK    ctrl → host  'HRUA' ver u16, seq u32, ok u8, message (utf-8)
++//   STATE  ctrl → host  'HRUT' ver u16, seq u32, timestamp_us u64, fsm u8, run_mode u8,
++//                       axes_connected u8, axes_enabled u8, axes_faulted u8, can_ok u8,
++//                       15×(motor_id u8, connected u8, axis_state u8, has_fault u8, channel u8,
++//                           pad[3], position f32, velocity f32, effort f32)             = 324 B
++// svc numbers equal IpcCommandType (1 ENABLE_ALL, 2 DISABLE_ALL, 3 EMERGENCY_STOP, 4 RESET_FAULT,
++// 6 ENABLE_AXIS, 7 DISABLE_AXIS, 9 SET_RUN_MODE (value = mode), 12 HOME_AXIS, 13 RESCAN_UID).
++// fsm uses the ros2_interfaces/UpperBodySystemState numbering (0 POWER_OFF, 1 DRIVER_INIT,
++// 2 READY, 3 ENABLING, 4 ENABLED, 5 RUNNING, 6 FAULT).
++//
++// This module depends only on POSIX sockets and the C++ standard library so it can be
++// unit-tested without the iRobe SDK.  All socket operations are non-blocking.
++// ---------------------------------------------------------------------------
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <functional>
++#include <string>
++
++#include <netinet/in.h>
++
++namespace hr::udp {
++
++inline constexpr uint16_t    PROTO_VERSION = 1u;
++inline constexpr std::size_t LINK_AXES     = 15u;
++inline constexpr std::size_t STATE_PACKET_SIZE = 24u + LINK_AXES * 20u;   // 324
++inline constexpr std::size_t MAX_CMD_ENTRIES   = 255u;
++
++// svc numbers (== IpcCommandType in main.cpp)
++inline constexpr uint16_t SVC_ENABLE_ALL     = 1u;
++inline constexpr uint16_t SVC_DISABLE_ALL    = 2u;
++inline constexpr uint16_t SVC_EMERGENCY_STOP = 3u;
++inline constexpr uint16_t SVC_RESET_FAULT    = 4u;
++inline constexpr uint16_t SVC_ENABLE_AXIS    = 6u;
++inline constexpr uint16_t SVC_DISABLE_AXIS   = 7u;
++inline constexpr uint16_t SVC_SET_RUN_MODE   = 9u;
++inline constexpr uint16_t SVC_HOME_AXIS      = 12u;
++inline constexpr uint16_t SVC_RESCAN_UID     = 13u;
++
++// fsm numbers on the wire (UpperBodySystemState)
++inline constexpr uint8_t FSM_POWER_OFF   = 0u;
++inline constexpr uint8_t FSM_DRIVER_INIT = 1u;
++inline constexpr uint8_t FSM_READY       = 2u;
++inline constexpr uint8_t FSM_ENABLING    = 3u;
++inline constexpr uint8_t FSM_ENABLED     = 4u;
++inline constexpr uint8_t FSM_RUNNING     = 5u;
++inline constexpr uint8_t FSM_FAULT       = 6u;
++
++struct LinkConfig {
++    bool        enabled{true};
++    std::string bind_addr{"0.0.0.0"};
++    uint16_t    listen_port{7001};
++    std::string peer_host{};          // empty = learn the peer from HELLO / CMD / SVC packets
++    uint16_t    peer_port{7002};
++    uint32_t    state_rate_hz{100};   // STATE packets per second (0 = never)
++    uint32_t    peer_timeout_ms{3000}; // learned peer is forgotten after this silence (0 = never)
++};
++
++struct AxisStatus {
++    uint8_t motor_id{255};
++    bool    connected{false};
++    uint8_t axis_state{255};   // hr::AxisState (2 = Run); 255 = unknown / no axis
++    bool    has_fault{false};
++    uint8_t channel{0};
++    float   position{0.0f};
++    float   velocity{0.0f};
++    float   effort{0.0f};
++};
++
++struct StateFrame {
++    uint64_t timestamp_us{0};
++    uint8_t  fsm{FSM_POWER_OFF};
++    uint8_t  run_mode{0};
++    uint8_t  axes_connected{0};
++    uint8_t  axes_enabled{0};
++    uint8_t  axes_faulted{0};
++    bool     can_ok{false};
++    std::array<AxisStatus, LINK_AXES> axes{};
++};
++
++struct CommandEntry {
++    uint8_t motor_id{0};
++    float   position{0.0f};
++};
++
++struct SvcResult {
++    bool        ok{false};
++    std::string message{};
++};
++
++struct LinkStats {
++    uint64_t rx_hello{0};
++    uint64_t rx_cmd{0};
++    uint64_t rx_cmd_entries{0};
++    uint64_t rx_svc{0};
++    uint64_t rx_bad{0};
++    uint64_t tx_state{0};
++    uint64_t tx_ack{0};
++    uint64_t tx_fail{0};
++};
++
++// Called for every CMD packet: mode (UpperBodyCommand.command_mode) and the entries.
++using CmdHandler = std::function<void(uint8_t mode, const CommandEntry* entries, std::size_t count)>;
++// Called for every SVC packet; the result is sent back as ACK.
++using SvcHandler = std::function<SvcResult(uint16_t svc, uint8_t motor_id, float value)>;
++
++// Pure packet (de)serialisation — exposed for tests.
++std::size_t encode_state(const StateFrame& frame, uint32_t seq, uint8_t* out, std::size_t out_size) noexcept;
++std::size_t encode_ack(uint32_t seq, bool ok, const std::string& message, uint8_t* out, std::size_t out_size) noexcept;
++
++class Link {
++public:
++    explicit Link(LinkConfig cfg);
++    ~Link();
++    Link(const Link&) = delete;
++    Link& operator=(const Link&) = delete;
++
++    // Create + bind the socket.  Returns false (and prints to stderr) on failure.
++    bool open();
++    void close() noexcept;
++    [[nodiscard]] bool is_open() const noexcept { return fd_ >= 0; }
++    [[nodiscard]] int  fd() const noexcept { return fd_; }
++    [[nodiscard]] const LinkConfig& config() const noexcept { return cfg_; }
++
++    // Drain every pending datagram (never blocks).  Handlers run inline.
++    void drain(const CmdHandler& on_cmd, const SvcHandler& on_svc, uint64_t now_us);
++
++    // Send one STATE packet to the peer, if any.  Returns true when a datagram went out.
++    bool send_state(const StateFrame& frame, uint64_t now_us);
++
++    [[nodiscard]] bool        has_peer(uint64_t now_us) const noexcept;
++    [[nodiscard]] std::string peer_text() const;
++    [[nodiscard]] uint32_t    state_period_us() const noexcept;
++
++    // Returns the counters accumulated since the previous call and resets them.
++    LinkStats take_stats() noexcept;
++
++private:
++    void handle_packet(const uint8_t* data, std::size_t len, const sockaddr_in& from,
++                       const CmdHandler& on_cmd, const SvcHandler& on_svc, uint64_t now_us);
++    void learn_peer(const sockaddr_in& from, uint64_t now_us, bool from_hello);
++    bool send_raw(const uint8_t* data, std::size_t len, const sockaddr_in& to) noexcept;
++
++    LinkConfig  cfg_;
++    int         fd_{-1};
++    sockaddr_in peer_{};
++    bool        peer_valid_{false};
++    bool        peer_fixed_{false};
++    uint64_t    peer_last_rx_us_{0};
++    uint32_t    state_seq_{0};
++    LinkStats   stats_{};
++};
++
++} // namespace hr::udp
+diff --git a/src/axis/axis_unit.cpp b/src/axis/axis_unit.cpp
+index 8209c43..991cd36 100644
+--- a/src/axis/axis_unit.cpp
++++ b/src/axis/axis_unit.cpp
+@@ -293,6 +293,22 @@ void AxisUnit::process_rx_frames()
+                 continue;
+             }
+ 
++            if (index == samhyun_can_od::LIMIT_SPD || index == samhyun_can_od::LOC_KP ||
++                index == samhyun_can_od::VEL_MAX_PP || index == samhyun_can_od::ACC_SET_PP) {
++                const char* name =
++                    (index == samhyun_can_od::LIMIT_SPD)  ? "limit_spd" :
++                    (index == samhyun_can_od::LOC_KP)     ? "loc_kp" :
++                    (index == samhyun_can_od::VEL_MAX_PP) ? "vel_max_pp" : "acc_set_pp";
++                const bool failed = (samhyun_can_b2(frame.id) & 0x01u) != 0u;   // OD read status bit16
++                IROBE_LOGI("[Axis %u] OD 0x%04X %s = %.4f%s",
++                           static_cast<unsigned>(axis_id_),
++                           static_cast<unsigned>(index),
++                           name,
++                           value_f32,
++                           failed ? " (read failed / unsupported)" : "");
++                continue;
++            }
++
+             if (od_readback_pending_ && index == od_readback_index_) {
+                 const uint32_t elapsed = cycle_count_ - od_readback_request_cycle_;
+                 const float err = value_f32 - od_readback_expected_f32_;
+@@ -352,6 +368,7 @@ void AxisUnit::process_rt_commands()
+             monitor_enable_sent_ = true;
+             od_position_mode_active_ = samhyun_is_position_mode(configured_run_mode_);
+             apply_run_mode(configured_run_mode_);
++            apply_position_tuning();   // while the drive is still idle (tuning OD writes need IDLE)
+             // Prime drive run state with Type 0x01 before Enable.
+             send_run_cmd();
+             send_enable();
+@@ -710,6 +727,23 @@ void AxisUnit::apply_run_mode(uint32_t mode) noexcept
+     send_od_read(samhyun_can_od::RUN_MODE);
+ }
+ 
++// ---------------------------------------------------------------------------
++// Position-loop tuning: write the configured OD values (0 = untouched), then read
++// every tuning index back so the drive's effective values appear in the log
++// ("[Axis n] OD 0x7017 limit_spd = …").  Called once per Enable, before Type 0x03.
++// ---------------------------------------------------------------------------
++void AxisUnit::apply_position_tuning() noexcept
++{
++    if (tuning_.limit_spd_rad_s > 0.0f)    { send_od_write_f32(samhyun_can_od::LIMIT_SPD,  tuning_.limit_spd_rad_s); }
++    if (tuning_.loc_kp > 0.0f)             { send_od_write_f32(samhyun_can_od::LOC_KP,     tuning_.loc_kp); }
++    if (tuning_.vel_max_pp_rad_s > 0.0f)   { send_od_write_f32(samhyun_can_od::VEL_MAX_PP, tuning_.vel_max_pp_rad_s); }
++    if (tuning_.acc_set_pp_rad_s2 > 0.0f)  { send_od_write_f32(samhyun_can_od::ACC_SET_PP, tuning_.acc_set_pp_rad_s2); }
++    send_od_read(samhyun_can_od::LIMIT_SPD);
++    send_od_read(samhyun_can_od::LOC_KP);
++    send_od_read(samhyun_can_od::VEL_MAX_PP);
++    send_od_read(samhyun_can_od::ACC_SET_PP);
++}
++
+ // ---------------------------------------------------------------------------
+ void AxisUnit::zero_non_impedance_targets() noexcept
+ {
+diff --git a/src/main.cpp b/src/main.cpp
+index cccee95..4c81bb7 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -3,9 +3,9 @@
+ //
+ // Architecture:
+ //
+-//   Future upper controller / Jetson ROS2 bridge
+-//        │ ROS2 topics or local bridge commands
+-//        ▼
++//   Jetson (quest_arm_ik hr_udp_relay)  ── UDP 7001 (CMD/SVC/HELLO) / STATE+ACK ──┐
++//   Local tools (Unix datagram IPC /tmp/hr_controller_cmd.sock, state JSON)       │
++//        │ main loop: poll(1 ms) → IpcCommandPacket → irobe::Command               ▼
+ //   Optional ROS2 Network Layer  ←─ IRos2Bridge (hr::ros2::IRos2Bridge)
+ //        │ irobe::Command
+ //        ▼
+@@ -44,6 +44,7 @@
+ #include "hr/coordinator/hr_coordinator.hpp"
+ #include "hr/ros2/ros2_interface.hpp"
+ #include "hr/ros2/upper_body_msgs.hpp"
++#include "hr/udp/hr_udp_link.hpp"
+ 
+ #include <array>
+ #include <atomic>
+@@ -58,6 +59,7 @@
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <memory>
++#include <poll.h>
+ #include <sstream>
+ #include <string>
+ #include <type_traits>
+@@ -488,6 +490,208 @@ static void drain_ipc_commands(irobe::Runtime& runtime, int sock)
+         dispatch_ipc_command(runtime, packet);
+     }
+ }
++
++// ---------------------------------------------------------------------------
++// Direct UDP link (hr::udp::Link) — the Jetson speaks the same command set as
++// the IPC socket, so every link packet is turned into an IpcCommandPacket and
++// goes through dispatch_ipc_command(); nothing else in the controller changes.
++// ---------------------------------------------------------------------------
++struct LinkCounters {
++    uint64_t dispatched{0};       // MoveToPos requests handed to the coordinator
++    uint64_t skipped_disabled{0}; // entries for axes that are not in Run (not enabled)
++    uint64_t unknown_motor{0};    // entries whose motor_id is not a configured/scanned axis
++    uint64_t bad_mode{0};         // CMD packets with command_mode other than 1/6
++};
++
++static uint8_t link_fsm_code(hr::ControllerFsmState s) noexcept
++{
++    switch (s) {
++    case hr::ControllerFsmState::Boot:             return hr::udp::FSM_POWER_OFF;
++    case hr::ControllerFsmState::Init:             return hr::udp::FSM_DRIVER_INIT;
++    case hr::ControllerFsmState::Ready:            return hr::udp::FSM_READY;
++    case hr::ControllerFsmState::Enabling:         return hr::udp::FSM_ENABLING;
++    case hr::ControllerFsmState::ImpedanceControl: return hr::udp::FSM_ENABLED;
++    case hr::ControllerFsmState::OdControl:        return hr::udp::FSM_ENABLED;
++    case hr::ControllerFsmState::MotionRunning:    return hr::udp::FSM_RUNNING;
++    case hr::ControllerFsmState::Pause:            return hr::udp::FSM_ENABLED;
++    case hr::ControllerFsmState::Fault:            return hr::udp::FSM_FAULT;
++    case hr::ControllerFsmState::EmergencyStop:    return hr::udp::FSM_FAULT;
++    default:                                       return hr::udp::FSM_POWER_OFF;
++    }
++}
++
++// motor (CAN node) id of a logical axis: runtime mapping first, config as fallback, 255 = none
++static uint8_t link_motor_of_axis(const std::shared_ptr<hr::CanBusQueues>& can_queues,
++                                  const hr::HrConfig& cfg,
++                                  uint8_t axis_id) noexcept
++{
++    if (can_queues) {
++        const uint8_t mapped = can_queues->node_id_of_axis(axis_id);
++        if (mapped >= 1u && mapped <= hr::SAMHYUN_NODE_ID_MAX) { return mapped; }
++    }
++    if (axis_id >= 1u && axis_id <= hr::NUM_AXES) {
++        const uint8_t configured = cfg.axes[axis_id - 1u].can_node_id;
++        if (configured >= 1u && configured <= hr::SAMHYUN_NODE_ID_MAX) { return configured; }
++    }
++    return 255u;
++}
++
++static uint8_t link_axis_of_motor(const std::shared_ptr<hr::CanBusQueues>& can_queues,
++                                  const hr::HrConfig& cfg,
++                                  uint8_t motor_id) noexcept
++{
++    if (motor_id == 0u || motor_id == 255u) { return 0u; }
++    for (uint8_t axis_id = 1u; axis_id <= hr::NUM_AXES; ++axis_id) {
++        if (link_motor_of_axis(can_queues, cfg, axis_id) == motor_id) { return axis_id; }
++    }
++    return 0u;
++}
++
++// Same content as write_state_json(), read straight from the RT snapshot stores.
++// Entries whose store read fails keep their previous values in `frame`.
++static void fill_link_state(hr::udp::StateFrame& frame,
++                            const hr::ControllerSnapshot& controller,
++                            const std::array<std::shared_ptr<hr::AxisSnapshotStore>, hr::NUM_AXES>& snapshot_stores,
++                            const std::shared_ptr<hr::CanBusQueues>& can_queues,
++                            const hr::HrConfig& cfg,
++                            uint64_t now_us)
++{
++    frame.timestamp_us = now_us;
++    frame.fsm = link_fsm_code(controller.state);
++    frame.axes_connected = controller.axes_connected;
++    frame.axes_enabled = controller.axes_enabled;
++    frame.axes_faulted = controller.axes_faulted;
++    frame.can_ok = controller.can_ok;
++
++    bool run_mode_set = false;
++    for (uint8_t i = 0u; i < hr::NUM_AXES && i < hr::udp::LINK_AXES; ++i) {
++        const uint8_t axis_id = static_cast<uint8_t>(i + 1u);
++        hr::udp::AxisStatus& a = frame.axes[i];
++        a.motor_id = link_motor_of_axis(can_queues, cfg, axis_id);
++        a.channel = can_queues ? can_queues->channel_of_axis(axis_id) : 0u;
++
++        hr::AxisSnapshot snap{};
++        if (!snapshot_stores[i] || !snapshot_stores[i]->read(snap)) {
++            continue;
++        }
++        const uint64_t age_us = now_us > snap.timestamp_us ? (now_us - snap.timestamp_us) : 0u;
++        a.connected = snap.feedback_counter > 0u && age_us <= cfg.coordinator.axis_feedback_stale_us;
++        a.axis_state = static_cast<uint8_t>(snap.state);
++        a.has_fault = snap.fault;
++        a.position = snap.actual_position;
++        a.velocity = snap.actual_velocity;
++        a.effort = snap.actual_torque;
++        if (a.connected && !run_mode_set) {
++            frame.run_mode = snap.configured_run_mode;
++            run_mode_set = true;
++        }
++    }
++}
++
++static IpcCommandPacket link_packet(IpcCommandType type, uint8_t axis_id, float position = 0.0f) noexcept
++{
++    IpcCommandPacket packet{};
++    packet.magic = k_ipc_magic;
++    packet.version = k_ipc_version;
++    packet.type = static_cast<uint16_t>(type);
++    packet.payload.axis_id = axis_id;
++    packet.payload.position = position;
++    return packet;
++}
++
++// CMD: one MoveToPos per listed motor that is currently enabled (AxisState::Run).
++static void handle_link_cmd(irobe::Runtime& runtime,
++                            const std::array<std::shared_ptr<hr::AxisSnapshotStore>, hr::NUM_AXES>& snapshot_stores,
++                            const std::shared_ptr<hr::CanBusQueues>& can_queues,
++                            const hr::HrConfig& cfg,
++                            LinkCounters& counters,
++                            uint8_t mode,
++                            const hr::udp::CommandEntry* entries,
++                            std::size_t count)
++{
++    if (mode != 1u && mode != 6u) {   // UpperBodyCommand: 1 POSITION, 6 POSITION_SERVO — this controller is position-only
++        ++counters.bad_mode;
++        return;
++    }
++    for (std::size_t k = 0; k < count; ++k) {
++        const uint8_t axis_id = link_axis_of_motor(can_queues, cfg, entries[k].motor_id);
++        if (axis_id == 0u) {
++            ++counters.unknown_motor;
++            continue;
++        }
++        hr::AxisSnapshot snap{};
++        const bool have = snapshot_stores[axis_id - 1u] && snapshot_stores[axis_id - 1u]->read(snap);
++        if (!have || snap.state != hr::AxisState::Run) {
++            ++counters.skipped_disabled;   // the coordinator would reject it anyway ("axis_id not monitored" / not enabled)
++            continue;
++        }
++        dispatch_ipc_command(runtime, link_packet(IpcCommandType::MoveToPos, axis_id, entries[k].position));
++        ++counters.dispatched;
++    }
++}
++
++// SVC: same numbers as IpcCommandType.  The ACK only confirms that the command was
++// handed to the coordinator; the host watches STATE for the effect (as with the IPC bridge).
++static hr::udp::SvcResult handle_link_svc(irobe::Runtime& runtime,
++                                          const hr::HrCoordinator& coordinator,
++                                          const std::shared_ptr<hr::CanBusQueues>& can_queues,
++                                          const hr::HrConfig& cfg,
++                                          uint16_t svc,
++                                          uint8_t motor_id,
++                                          float value)
++{
++    const hr::ControllerFsmState fsm = coordinator.fsm_state();
++    switch (svc) {
++    case hr::udp::SVC_ENABLE_ALL:
++        if (fsm != hr::ControllerFsmState::Ready &&
++            fsm != hr::ControllerFsmState::ImpedanceControl &&
++            fsm != hr::ControllerFsmState::OdControl) {
++            return {false, std::string("EnableAll rejected: fsm=") + hr::fsm_state_name(fsm)};
++        }
++        dispatch_ipc_command(runtime, link_packet(IpcCommandType::EnableAll, 0u));
++        return {true, "ok"};
++    case hr::udp::SVC_DISABLE_ALL:
++        dispatch_ipc_command(runtime, link_packet(IpcCommandType::DisableAll, 0u));
++        return {true, "ok"};
++    case hr::udp::SVC_EMERGENCY_STOP:
++        dispatch_ipc_command(runtime, link_packet(IpcCommandType::EmergencyStop, 0u));
++        return {true, "ok"};
++    case hr::udp::SVC_RESET_FAULT:
++        dispatch_ipc_command(runtime, link_packet(IpcCommandType::ResetFault, 0u));
++        return {true, "ok"};
++    default:
++        break;
++    }
++
++    // per-axis services: motor_id 0 = all axes (coordinator broadcast), except enable/disable axis
++    uint8_t axis_id = 0u;
++    if (motor_id != 0u) {
++        axis_id = link_axis_of_motor(can_queues, cfg, motor_id);
++        if (axis_id == 0u) {
++            return {false, "unknown motor_id " + std::to_string(static_cast<unsigned>(motor_id))};
++        }
++    }
++
++    switch (svc) {
++    case hr::udp::SVC_ENABLE_AXIS:
++    case hr::udp::SVC_DISABLE_AXIS:
++        if (axis_id == 0u) { return {false, "motor_id required"}; }
++        dispatch_ipc_command(runtime, link_packet(svc == hr::udp::SVC_ENABLE_AXIS ? IpcCommandType::EnableAxis
++                                                                                 : IpcCommandType::DisableAxis, axis_id));
++        return {true, "ok"};
++    case hr::udp::SVC_SET_RUN_MODE:
++        dispatch_ipc_command(runtime, link_packet(IpcCommandType::SetRunMode, axis_id, value));   // mode travels in `position`
++        return {true, "ok"};
++    case hr::udp::SVC_HOME_AXIS:
++        dispatch_ipc_command(runtime, link_packet(IpcCommandType::HomeAxis, axis_id));
++        return {true, "ok"};
++    case hr::udp::SVC_RESCAN_UID:
++        dispatch_ipc_command(runtime, link_packet(IpcCommandType::RescanUid, axis_id));
++        return {true, "ok"};
++    default:
++        return {false, "unsupported svc " + std::to_string(static_cast<unsigned>(svc))};
++    }
++}
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -846,6 +1050,16 @@ int main(int argc, char* argv[])
+                 cfg.axes[axis_id - 1u].position_limit_max_rad,
+                 can_queues,
+                 snapshot_stores[axis_id - 1u]);
++            {
++                const hr::PositionTuningConfig tuning = hr::resolve_tuning(cfg.position_tuning, cfg.axes[axis_id - 1u].tuning);
++                axis_units[axis_id - 1u]->set_position_tuning(tuning);
++                if (tuning.limit_spd_rad_s > 0.0f || tuning.loc_kp > 0.0f || tuning.vel_max_pp_rad_s > 0.0f || tuning.acc_set_pp_rad_s2 > 0.0f) {
++                    std::cout << "[HR] axis " << static_cast<unsigned>(axis_id) << " position_tuning on enable:"
++                              << " limit_spd=" << tuning.limit_spd_rad_s << " loc_kp=" << tuning.loc_kp
++                              << " vel_max_pp=" << tuning.vel_max_pp_rad_s << " acc_set_pp=" << tuning.acc_set_pp_rad_s2
++                              << " (0 = keep drive value)\n";
++                }
++            }
+             IROBE_ERROR_CHECK(runtime.components().register_unit(axis_units[axis_id - 1u]));
+         }
+     }
+@@ -1037,10 +1251,61 @@ int main(int argc, char* argv[])
+     const int ipc_sock = create_ipc_socket();
+     uint64_t last_state_export_us = 0u;
+ 
++    // Direct UDP link to the Jetson (see hr/udp/hr_udp_link.hpp)
++    hr::udp::LinkConfig link_cfg{};
++    link_cfg.enabled         = cfg.udp_link.enabled;
++    link_cfg.bind_addr       = cfg.udp_link.bind_addr;
++    link_cfg.listen_port     = cfg.udp_link.listen_port;
++    link_cfg.peer_host       = cfg.udp_link.peer_host;
++    link_cfg.peer_port       = cfg.udp_link.peer_port;
++    link_cfg.state_rate_hz   = cfg.udp_link.state_rate_hz;
++    link_cfg.peer_timeout_ms = cfg.udp_link.peer_timeout_ms;
++    hr::udp::Link link(link_cfg);
++    if (cfg.udp_link.enabled) {
++        if (link.open()) {
++            std::cout << "[HR-UDP] listening on " << cfg.udp_link.bind_addr << ":" << cfg.udp_link.listen_port
++                      << ", STATE " << cfg.udp_link.state_rate_hz << " Hz → peer " << link.peer_text() << "\n";
++        } else {
++            std::cerr << "[HR-UDP] link disabled (socket error) — only the IPC socket is served\n";
++        }
++    } else {
++        std::cout << "[HR-UDP] link disabled by config (udp_link.enabled: false)\n";
++    }
++    LinkCounters link_counters{};
++    const hr::udp::CmdHandler on_link_cmd =
++        [&](uint8_t mode, const hr::udp::CommandEntry* entries, std::size_t count) {
++            handle_link_cmd(runtime, snapshot_stores, can_queues, cfg, link_counters, mode, entries, count);
++        };
++    const hr::udp::SvcHandler on_link_svc =
++        [&](uint16_t svc, uint8_t motor_id, float value) {
++            const auto result = handle_link_svc(runtime, coordinator, can_queues, cfg, svc, motor_id, value);
++            std::cout << "[HR-UDP] svc " << svc << " motor " << static_cast<unsigned>(motor_id)
++                      << " value " << value << " → " << (result.ok ? "ok" : "REJECTED") << " " << result.message << "\n";
++            return result;
++        };
++    hr::udp::StateFrame link_state{};
++    const uint64_t link_state_period_us = link.state_period_us();
++    uint64_t next_link_state_us = 0u;
++    uint64_t next_link_report_us = static_cast<uint64_t>(irobe::platform::now_us()) + 5000000u;
++
+     while (g_running.load()) {
+-        irobe::platform::sleep_for(std::chrono::milliseconds(5));
++        // Wait up to 1 ms for IPC / UDP traffic (previously a fixed 5 ms sleep); commands are
++        // forwarded to the coordinator as soon as they arrive.
++        {
++            pollfd pfds[2];
++            int n_fds = 0;
++            if (ipc_sock >= 0)  { pfds[n_fds++] = pollfd{ipc_sock, POLLIN, 0}; }
++            if (link.is_open()) { pfds[n_fds++] = pollfd{link.fd(), POLLIN, 0}; }
++            if (n_fds > 0) {
++                (void)::poll(pfds, static_cast<nfds_t>(n_fds), 1);
++            } else {
++                irobe::platform::sleep_for(std::chrono::milliseconds(1));
++            }
++        }
++        const uint64_t loop_now_us = static_cast<uint64_t>(irobe::platform::now_us());
+ 
+         drain_ipc_commands(runtime, ipc_sock);
++        link.drain(on_link_cmd, on_link_svc, loop_now_us);
+ 
+         const hr::ControllerFsmState cur = coordinator.fsm_state();
+         if (cur != last_fsm) {
+@@ -1072,6 +1337,27 @@ int main(int argc, char* argv[])
+                 write_state_json(coordinator, csnap, cfg, can_queues, now_us);
+                 last_state_export_us = now_us;
+             }
++            if (link.is_open() && link_state_period_us > 0u && now_us >= next_link_state_us) {
++                fill_link_state(link_state, csnap, snapshot_stores, can_queues, cfg, now_us);
++                (void)link.send_state(link_state, now_us);
++                next_link_state_us = (next_link_state_us == 0u || now_us > next_link_state_us + link_state_period_us)
++                    ? now_us + link_state_period_us
++                    : next_link_state_us + link_state_period_us;
++            }
++        }
++
++        if (link.is_open() && loop_now_us >= next_link_report_us) {
++            const hr::udp::LinkStats s = link.take_stats();
++            std::cout << "[HR-UDP] peer=" << link.peer_text()
++                      << " cmd " << s.rx_cmd / 5 << "/s (entries " << s.rx_cmd_entries / 5
++                      << "/s, dispatched " << link_counters.dispatched / 5
++                      << "/s, skipped_disabled " << link_counters.skipped_disabled
++                      << ", unknown_motor " << link_counters.unknown_motor
++                      << ", bad_mode " << link_counters.bad_mode << ")"
++                      << " svc " << s.rx_svc << " state " << s.tx_state / 5 << "/s"
++                      << " bad " << s.rx_bad << " tx_fail " << s.tx_fail << "\n";
++            link_counters = LinkCounters{};
++            next_link_report_us += 5000000u;
+         }
+     }
+ 
+diff --git a/src/udp/hr_udp_link.cpp b/src/udp/hr_udp_link.cpp
+new file mode 100644
+index 0000000..3d0d43d
+--- /dev/null
++++ b/src/udp/hr_udp_link.cpp
+@@ -0,0 +1,284 @@
++#include "hr/udp/hr_udp_link.hpp"
++
++#include <arpa/inet.h>
++#include <cerrno>
++#include <cstdio>
++#include <cstring>
++#include <fcntl.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++namespace hr::udp {
++
++namespace {
++
++constexpr uint8_t MAGIC_HELLO[4] = {'H', 'R', 'U', 'H'};
++constexpr uint8_t MAGIC_CMD[4]   = {'H', 'R', 'U', 'C'};
++constexpr uint8_t MAGIC_SVC[4]   = {'H', 'R', 'U', 'S'};
++constexpr uint8_t MAGIC_ACK[4]   = {'H', 'R', 'U', 'A'};
++constexpr uint8_t MAGIC_STATE[4] = {'H', 'R', 'U', 'T'};
++
++constexpr std::size_t HELLO_SIZE   = 10u;   // <4sHI
++constexpr std::size_t CMD_HDR_SIZE = 12u;   // <4sHIBB
++constexpr std::size_t CMD_ENTRY_SIZE = 5u;  // <Bf
++constexpr std::size_t SVC_SIZE     = 18u;   // <4sHIHBBf
++constexpr std::size_t ACK_HDR_SIZE = 11u;   // <4sHIB
++constexpr std::size_t ACK_MSG_MAX  = 900u;
++constexpr std::size_t RX_BUF_SIZE  = 2048u;
++
++inline void put_u16(uint8_t* p, uint16_t v) noexcept { p[0] = static_cast<uint8_t>(v); p[1] = static_cast<uint8_t>(v >> 8); }
++inline void put_u32(uint8_t* p, uint32_t v) noexcept { for (int i = 0; i < 4; ++i) { p[i] = static_cast<uint8_t>(v >> (8 * i)); } }
++inline void put_u64(uint8_t* p, uint64_t v) noexcept { for (int i = 0; i < 8; ++i) { p[i] = static_cast<uint8_t>(v >> (8 * i)); } }
++inline void put_f32(uint8_t* p, float v) noexcept { uint32_t u; std::memcpy(&u, &v, 4); put_u32(p, u); }
++inline uint16_t get_u16(const uint8_t* p) noexcept { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
++inline uint32_t get_u32(const uint8_t* p) noexcept
++{
++    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
++           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
++}
++inline float get_f32(const uint8_t* p) noexcept { const uint32_t u = get_u32(p); float f; std::memcpy(&f, &u, 4); return f; }
++inline bool magic_is(const uint8_t* p, const uint8_t (&m)[4]) noexcept { return std::memcmp(p, m, 4) == 0; }
++
++bool same_addr(const sockaddr_in& a, const sockaddr_in& b) noexcept
++{
++    return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
++}
++
++std::string addr_text(const sockaddr_in& a)
++{
++    char buf[INET_ADDRSTRLEN] = {};
++    if (::inet_ntop(AF_INET, &a.sin_addr, buf, sizeof(buf)) == nullptr) { return "?"; }
++    return std::string(buf) + ":" + std::to_string(ntohs(a.sin_port));
++}
++
++} // namespace
++
++// ---------------------------------------------------------------------------
++std::size_t encode_state(const StateFrame& frame, uint32_t seq, uint8_t* out, std::size_t out_size) noexcept
++{
++    if (out_size < STATE_PACKET_SIZE) { return 0u; }
++    uint8_t* p = out;
++    std::memcpy(p, MAGIC_STATE, 4); p += 4;
++    put_u16(p, PROTO_VERSION); p += 2;
++    put_u32(p, seq); p += 4;
++    put_u64(p, frame.timestamp_us); p += 8;
++    *p++ = frame.fsm;
++    *p++ = frame.run_mode;
++    *p++ = frame.axes_connected;
++    *p++ = frame.axes_enabled;
++    *p++ = frame.axes_faulted;
++    *p++ = frame.can_ok ? 1u : 0u;
++    for (const AxisStatus& a : frame.axes) {
++        *p++ = a.motor_id;
++        *p++ = a.connected ? 1u : 0u;
++        *p++ = a.axis_state;
++        *p++ = a.has_fault ? 1u : 0u;
++        *p++ = a.channel;
++        *p++ = 0u; *p++ = 0u; *p++ = 0u;          // pad[3]
++        put_f32(p, a.position); p += 4;
++        put_f32(p, a.velocity); p += 4;
++        put_f32(p, a.effort);   p += 4;
++    }
++    return static_cast<std::size_t>(p - out);
++}
++
++std::size_t encode_ack(uint32_t seq, bool ok, const std::string& message, uint8_t* out, std::size_t out_size) noexcept
++{
++    const std::size_t msg_len = message.size() < ACK_MSG_MAX ? message.size() : ACK_MSG_MAX;
++    if (out_size < ACK_HDR_SIZE + msg_len) { return 0u; }
++    uint8_t* p = out;
++    std::memcpy(p, MAGIC_ACK, 4); p += 4;
++    put_u16(p, PROTO_VERSION); p += 2;
++    put_u32(p, seq); p += 4;
++    *p++ = ok ? 1u : 0u;
++    std::memcpy(p, message.data(), msg_len); p += msg_len;
++    return static_cast<std::size_t>(p - out);
++}
++
++// ---------------------------------------------------------------------------
++Link::Link(LinkConfig cfg) : cfg_(std::move(cfg)) {}
++
++Link::~Link() { close(); }
++
++bool Link::open()
++{
++    close();
++    if (!cfg_.enabled) { return false; }
++
++    fd_ = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
++    if (fd_ < 0) {
++        std::perror("[HR-UDP] socket");
++        return false;
++    }
++
++    sockaddr_in local{};
++    local.sin_family = AF_INET;
++    local.sin_port = htons(cfg_.listen_port);
++    if (cfg_.bind_addr.empty() || cfg_.bind_addr == "0.0.0.0") {
++        local.sin_addr.s_addr = htonl(INADDR_ANY);
++    } else if (::inet_pton(AF_INET, cfg_.bind_addr.c_str(), &local.sin_addr) != 1) {
++        std::fprintf(stderr, "[HR-UDP] invalid bind_addr '%s'\n", cfg_.bind_addr.c_str());
++        close();
++        return false;
++    }
++    if (::bind(fd_, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
++        std::fprintf(stderr, "[HR-UDP] bind %s:%u failed: %s (is hr_udp_bridge.py still running?)\n",
++                     cfg_.bind_addr.c_str(), static_cast<unsigned>(cfg_.listen_port), std::strerror(errno));
++        close();
++        return false;
++    }
++
++    peer_valid_ = false;
++    peer_fixed_ = false;
++    if (!cfg_.peer_host.empty()) {
++        sockaddr_in p{};
++        p.sin_family = AF_INET;
++        p.sin_port = htons(cfg_.peer_port);
++        if (::inet_pton(AF_INET, cfg_.peer_host.c_str(), &p.sin_addr) == 1) {
++            peer_ = p;
++            peer_valid_ = true;
++            peer_fixed_ = true;
++        } else {
++            std::fprintf(stderr, "[HR-UDP] invalid peer_host '%s' — will learn the peer from HELLO\n", cfg_.peer_host.c_str());
++        }
++    }
++    return true;
++}
++
++void Link::close() noexcept
++{
++    if (fd_ >= 0) {
++        ::close(fd_);
++        fd_ = -1;
++    }
++}
++
++uint32_t Link::state_period_us() const noexcept
++{
++    if (cfg_.state_rate_hz == 0u) { return 0u; }
++    return 1000000u / cfg_.state_rate_hz;
++}
++
++bool Link::has_peer(uint64_t now_us) const noexcept
++{
++    if (!peer_valid_) { return false; }
++    if (peer_fixed_ || cfg_.peer_timeout_ms == 0u) { return true; }
++    const uint64_t timeout_us = static_cast<uint64_t>(cfg_.peer_timeout_ms) * 1000u;
++    return now_us <= peer_last_rx_us_ + timeout_us;
++}
++
++std::string Link::peer_text() const
++{
++    if (!peer_valid_) { return "(none)"; }
++    return addr_text(peer_) + (peer_fixed_ ? " (fixed)" : "");
++}
++
++LinkStats Link::take_stats() noexcept
++{
++    const LinkStats s = stats_;
++    stats_ = LinkStats{};
++    return s;
++}
++
++void Link::learn_peer(const sockaddr_in& from, uint64_t now_us, bool from_hello)
++{
++    peer_last_rx_us_ = now_us;
++    if (peer_fixed_) { return; }
++    if (!peer_valid_ || (from_hello && !same_addr(peer_, from))) {
++        peer_ = from;
++        peer_valid_ = true;
++        std::printf("[HR-UDP] peer %s registered (%s)\n", addr_text(from).c_str(), from_hello ? "HELLO" : "first packet");
++    }
++}
++
++bool Link::send_raw(const uint8_t* data, std::size_t len, const sockaddr_in& to) noexcept
++{
++    if (fd_ < 0) { return false; }
++    const ssize_t n = ::sendto(fd_, data, len, MSG_DONTWAIT, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
++    if (n != static_cast<ssize_t>(len)) {
++        ++stats_.tx_fail;
++        return false;
++    }
++    return true;
++}
++
++bool Link::send_state(const StateFrame& frame, uint64_t now_us)
++{
++    if (!has_peer(now_us)) { return false; }
++    uint8_t buf[STATE_PACKET_SIZE];
++    const std::size_t n = encode_state(frame, ++state_seq_, buf, sizeof(buf));
++    if (n == 0u) { return false; }
++    if (!send_raw(buf, n, peer_)) { return false; }
++    ++stats_.tx_state;
++    return true;
++}
++
++void Link::drain(const CmdHandler& on_cmd, const SvcHandler& on_svc, uint64_t now_us)
++{
++    if (fd_ < 0) { return; }
++    uint8_t buf[RX_BUF_SIZE];
++    for (int guard = 0; guard < 256; ++guard) {           // bounded: never starve the caller
++        sockaddr_in from{};
++        socklen_t from_len = sizeof(from);
++        const ssize_t n = ::recvfrom(fd_, buf, sizeof(buf), MSG_DONTWAIT,
++                                     reinterpret_cast<sockaddr*>(&from), &from_len);
++        if (n < 0) {
++            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) { return; }
++            ++stats_.rx_bad;
++            return;
++        }
++        if (from.sin_family != AF_INET) { ++stats_.rx_bad; continue; }
++        handle_packet(buf, static_cast<std::size_t>(n), from, on_cmd, on_svc, now_us);
++    }
++}
++
++void Link::handle_packet(const uint8_t* data, std::size_t len, const sockaddr_in& from,
++                         const CmdHandler& on_cmd, const SvcHandler& on_svc, uint64_t now_us)
++{
++    if (len < 6u || get_u16(data + 4) != PROTO_VERSION) { ++stats_.rx_bad; return; }
++
++    if (magic_is(data, MAGIC_HELLO)) {
++        if (len < HELLO_SIZE) { ++stats_.rx_bad; return; }
++        ++stats_.rx_hello;
++        learn_peer(from, now_us, true);
++        return;
++    }
++
++    if (magic_is(data, MAGIC_CMD)) {
++        if (len < CMD_HDR_SIZE) { ++stats_.rx_bad; return; }
++        const uint8_t mode = data[10];
++        const std::size_t count = data[11];
++        if (len < CMD_HDR_SIZE + count * CMD_ENTRY_SIZE) { ++stats_.rx_bad; return; }
++        ++stats_.rx_cmd;
++        stats_.rx_cmd_entries += count;
++        learn_peer(from, now_us, false);
++        CommandEntry entries[MAX_CMD_ENTRIES];
++        for (std::size_t k = 0; k < count; ++k) {
++            const uint8_t* e = data + CMD_HDR_SIZE + k * CMD_ENTRY_SIZE;
++            entries[k].motor_id = e[0];
++            entries[k].position = get_f32(e + 1);
++        }
++        if (on_cmd) { on_cmd(mode, entries, count); }
++        return;
++    }
++
++    if (magic_is(data, MAGIC_SVC)) {
++        if (len < SVC_SIZE) { ++stats_.rx_bad; return; }
++        ++stats_.rx_svc;
++        learn_peer(from, now_us, false);
++        const uint32_t seq = get_u32(data + 6);
++        const uint16_t svc = get_u16(data + 10);
++        const uint8_t  motor_id = data[12];
++        const float    value = get_f32(data + 14);
++        SvcResult result{false, "no handler"};
++        if (on_svc) { result = on_svc(svc, motor_id, value); }
++        uint8_t ack[ACK_HDR_SIZE + ACK_MSG_MAX];
++        const std::size_t n = encode_ack(seq, result.ok, result.message, ack, sizeof(ack));
++        if (n > 0u && send_raw(ack, n, from)) { ++stats_.tx_ack; }
++        return;
++    }
++
++    ++stats_.rx_bad;   // ACK / STATE are never expected on this side
++}
++
++} // namespace hr::udp

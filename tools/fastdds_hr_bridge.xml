@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- (선택 ③) RELIABLE 로 남겨 둔 발행자가 있을 때 publish() 최대 대기시간을 20 ms 로 제한.
+     사용: run_ros2_state_bridge.sh 의 exec 줄 앞에
+       export FASTRTPS_DEFAULT_PROFILES_FILE=$ROOT_DIR/tools/fastdds_hr_bridge.xml
+     ①(BEST_EFFORT)을 적용했다면 필요 없음. -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <data_writer profile_name="hr_bridge_default_writer" is_default_profile="true">
+        <qos>
+            <reliability>
+                <max_blocking_time>
+                    <sec>0</sec>
+                    <nanosec>20000000</nanosec>
+                </max_blocking_time>
+            </reliability>
+        </qos>
+    </data_writer>
+</profiles>

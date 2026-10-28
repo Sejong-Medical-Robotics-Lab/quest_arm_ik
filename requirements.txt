@@ -1,0 +1,16 @@
+# python3 -m pip install -r requirements.txt   (맥북 등 Thor 컨테이너 밖에서 쓸 때. Thor 는 docker/Dockerfile.zz_quest_teleop 가 /opt/quest_py venv 에 설치)
+# 검증된 조합: pin 3.9.0 (Thor venv 가 받는 버전) 과 pin 4.1.0 둘 다, pin-pink 4.4.0, qpsolvers 4.13, quadprog 0.1.13, mujoco 3.16, msgpack 1.2, xacro 2.1
+# ROS 2 쪽(rclpy, geometry_msgs, trajectory_msgs 등)은 컨테이너의 Jazzy 가 제공.
+pin>=3.3
+pin-pink>=3.1
+qpsolvers>=4.3
+quadprog>=0.1.12
+mujoco>=3.2
+msgpack>=1.0
+pyyaml>=6.0
+xacro>=2.0
+numpy>=1.24
+# pin 3.x 바이너리는 liburdfdom*.so.4 / libtinyxml2.so.10 에 링크돼 있는데 cmeel-urdfdom 은 cmeel-tinyxml2 버전을 명시하지 않는다.
+# 아래 두 줄이 없으면 새 환경에서 tinyxml2 11 이 섞여 "ImportError: libtinyxml2.so.10/.11" 이 난다 (NVIDIA IsaacTeleop 도 같은 캡 사용).
+cmeel-urdfdom<5
+cmeel-tinyxml2<11

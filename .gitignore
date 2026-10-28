@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+# colcon / ROS 2 (워크스페이스 안에서 빌드할 때)
+build/
+install/
+log/
+# 진단 산출물 (diag_latency npz, verify csv, 렌더 GIF)
+*.npz
+/tmp_*
+*.gif
+# 편집기
+.vscode/
+.idea/
+.DS_Store

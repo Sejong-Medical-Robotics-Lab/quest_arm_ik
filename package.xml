@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>quest_arm_ik</name>
+  <version>0.7.57</version>
+  <description>Meta Quest 3 → pink/Pinocchio differential IK → dual-arm (14-DoF) humanoid upper-body teleoperation</description>
+  <maintainer email="todo@sejong.ac.kr">Medical Robotics Lab, Sejong Univ.</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- pinocchio: apt ros-$ROS_DISTRO-pinocchio 또는 pip install pin ; pink/qpsolvers/quadprog 는 pip -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

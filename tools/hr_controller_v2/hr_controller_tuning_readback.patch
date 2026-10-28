@@ -1,0 +1,72 @@
+hr_controller 추가 패치 v2.3 — 튜닝값 read-back 지연 (2026-10-26). v2.2(hr_controller_tuning_peraxis.patch) 가 적용된 ~/hr_controller 위에 덧붙인다.
+================================================================================================================
+왜: enable 때 OD 쓰기 직후에 같은 묶음으로 읽기를 보내면 어깨 pitch 드라이브(축 1·8)는 아직 적용 전이라 **이전 값**을 돌려준다
+    (2026-10-26 실측: 4.0 을 쓰고 읽으면 1.7, 다음 세션에 2.0 을 쓰고 읽으면 4.0 — 한 번씩 늦게 보임). 쓰기 자체는 된다.
+바뀌는 것 (2파일): include/hr/axis/axis_unit.hpp (pending_tuning_read_cycles_, send_tuning_reads 선언),
+    src/axis/axis_unit.cpp (apply_position_tuning 은 쓰기만 하고 0.5 s(1 kHz 500 cycle) 뒤에 send_tuning_reads 로 4개 OD 를 읽음).
+동작: enable 로그의 "[Axis n] OD 0x7025 acc_set_pp = …" 가 enable 0.5 s 뒤에 찍히며 **드라이브에 실제 적용된 값**이다.
+
+미니PC:
+  scp 로 ~/ 에 복사 후
+  cd ~/hr_controller && git apply --check ~/hr_controller_tuning_readback.patch && git apply ~/hr_controller_tuning_readback.patch
+  cmake --build build/release        # tmux 창 1 Ctrl-C → Enter
+되돌리기: git apply -R ~/hr_controller_tuning_readback.patch && cmake --build build/release
+
+diff --git a/include/hr/axis/axis_unit.hpp b/include/hr/axis/axis_unit.hpp
+index 814837a..2324f07 100644
+--- a/include/hr/axis/axis_unit.hpp
++++ b/include/hr/axis/axis_unit.hpp
+@@ -53,7 +53,8 @@ private:
+     void apply_safe_hold() noexcept;
+     void issue_disable_sequence() noexcept;
+     void apply_run_mode(uint32_t mode) noexcept;
+-    void apply_position_tuning() noexcept;   // OD writes (configured ones) + read-back of all tuning indices
++    void apply_position_tuning() noexcept;
++    void send_tuning_reads() noexcept;      // OD read-back of limit_spd/loc_kp/vel_max_pp/acc_set_pp   // OD writes (configured ones) + read-back of all tuning indices
+     void zero_non_impedance_targets() noexcept;
+     float clamp_target_position(float position) const noexcept;
+ 
+@@ -93,6 +94,7 @@ private:
+     uint32_t     last_bench_position_write_cycle_{0};
+     uint32_t     bench_position_setup_cycle_{0};
+     uint8_t      pending_disable_cycles_{0};
++    uint16_t     pending_tuning_read_cycles_{0};   // >0: countdown (1 kHz cycles) until the position-tuning OD read-back is sent
+     bool         uid_seen_{false};
+     bool         enable_requested_{false};
+     bool         pending_mode_log_printed_{false};
+diff --git a/src/axis/axis_unit.cpp b/src/axis/axis_unit.cpp
+index 991cd36..39f55d7 100644
+--- a/src/axis/axis_unit.cpp
++++ b/src/axis/axis_unit.cpp
+@@ -20,6 +20,7 @@ constexpr bool     BENCH_POSITION_DEMO_ENABLED = false;
+ constexpr uint32_t BENCH_POSITION_SETUP_DELAY_CYCLES = RT_LOOP_HZ / 2u; // 500 ms
+ constexpr uint32_t BENCH_DEMO_WRITE_INTERVAL_CYCLES = CAN_DIVIDER;
+ constexpr uint8_t  DISABLE_SEQUENCE_REPEATS = 5u;
++constexpr uint16_t TUNING_READBACK_DELAY_CYCLES = 500u;   // 0.5 s at 1 kHz
+ constexpr float    BENCH_DEMO_MOVE_SPEED = 0.2f;                  // rad/s
+ constexpr float    BENCH_DEMO_MOVE_DELTA = 1.57079632679f;        // 90 deg
+ constexpr float    BENCH_DEMO_MIT_KP = 10.0f;
+@@ -137,6 +138,9 @@ bool AxisUnit::update_unit()
+ 
+     ++cycle_count_;
+     check_target_watchdog();
++    if (pending_tuning_read_cycles_ > 0u && --pending_tuning_read_cycles_ == 0u) {
++        send_tuning_reads();              // delayed read-back of the position-tuning OD values (see apply_position_tuning)
++    }
+ 
+     // Periodic CAN output at 500 Hz. Control TX has higher priority than idle
+     // 0x18 status polling so command-driven traffic replaces idle frames.
+@@ -738,6 +742,13 @@ void AxisUnit::apply_position_tuning() noexcept
+     if (tuning_.loc_kp > 0.0f)             { send_od_write_f32(samhyun_can_od::LOC_KP,     tuning_.loc_kp); }
+     if (tuning_.vel_max_pp_rad_s > 0.0f)   { send_od_write_f32(samhyun_can_od::VEL_MAX_PP, tuning_.vel_max_pp_rad_s); }
+     if (tuning_.acc_set_pp_rad_s2 > 0.0f)  { send_od_write_f32(samhyun_can_od::ACC_SET_PP, tuning_.acc_set_pp_rad_s2); }
++    // Read back later, not in the same burst: some drives (shoulder pitch, 2026-10-26) apply OD writes slowly and an
++    // immediate read still returns the previous value.  500 cycles = 0.5 s at the 1 kHz axis tick.
++    pending_tuning_read_cycles_ = TUNING_READBACK_DELAY_CYCLES;
++}
++
++void AxisUnit::send_tuning_reads() noexcept
++{
+     send_od_read(samhyun_can_od::LIMIT_SPD);
+     send_od_read(samhyun_can_od::LOC_KP);
+     send_od_read(samhyun_can_od::VEL_MAX_PP);

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Fast DDS 를 192.168.10.2 인터페이스 하나로만 묶는다 (다른 인터페이스 — docker0, Wi-Fi, enp1s0 — 의 주소를 상대에게 광고하지 않고, 그쪽으로 보내지도 않음).
+     사용: export FASTRTPS_DEFAULT_PROFILES_FILE=<이 파일 경로>  를 노드를 띄우는 셸(또는 run 스크립트의 exec 앞)에 넣고 노드 재시작.
+     확인: ros2 topic info -v 에서 상대 엔드포인트가 하나의 주소로만 보임. -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>udp_minipc</transport_id>
+            <type>UDPv4</type>
+            <interfaceWhiteList>
+                <address>192.168.10.2</address>
+            </interfaceWhiteList>
+        </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="whitelist_minipc" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>udp_minipc</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>

@@ -1,0 +1,156 @@
+# G1 29-DoF (MuJoCo Menagerie g1.xml / Unitree g1_29dof.urdf) 기준 설정 — 시뮬레이션 검증용 프로필.
+# 삼현 2세대(SH_Humanoid_v2) 는 별도 프로필 sh_humanoid_v2.yaml 을 쓴다 (관절 이름·축·준비 자세가 다름).
+
+quest_bridge:
+  ros__parameters:
+    input_mode: xr_teleop              # launch 의 input:= 가 덮어씀 (xr_teleop | pose_joy)
+    output_frame_id: pelvis
+    report_period: 0.0                 # 0 = 입력 시작/중단 전환 때만 로그. 10.0 이면 10 초마다 L/R 입력률도 출력
+    no_input_after: 5.0                # 입력이 이 시간[s] 이상 끊기면 한 번 경고 (0 = 경고 안 함)
+    # ---- xr_teleop: Isaac ROS 4.6 isaac_ros_teleop (teleop_ros2_node) 가 발행하는 /xr_teleop/* ----
+    ee_poses_topic: /xr_teleop/ee_poses
+    ee_poses_order: [left, right]      # poses[0]=왼손, poses[1]=오른손 (`ros2 run quest_arm_ik xr_dump` 로 확인)
+    controller_data_topic: /xr_teleop/controller_data
+    engage_mode: grip                  # grip: 그립 버튼을 쥔 동안만 추종(클러치) / always: 포즈가 오는 동안 항상
+    left_engage_key: left_squeeze_value    # 그립 버튼 아날로그 0~1 (트리거: left_trigger_value)
+    right_engage_key: right_squeeze_value
+    engage_threshold: 0.5
+    xr_pose_source: ee_poses           # ee_poses | controller_data (ee_poses 가 안 올 때 원시 grip 포즈로 대체)
+    xr_controller_pose: grip           # controller_data 소스일 때 grip | aim
+    # ---- pose_joy: 자체 Quest 브리지 ----
+    input_convention: unity            # unity | openxr | ros — launch 의 input_convention:= 가 덮어씀
+    left_pose_topic: /quest/left_controller/pose
+    right_pose_topic: /quest/right_controller/pose
+    joy_topic: /quest/joy
+    left_engage_button: 0
+    right_engage_button: 1
+    left_engage_axis: -1
+    right_engage_axis: -1
+    axis_threshold: 0.5
+
+dual_arm_ik:
+  ros__parameters:
+    model_path: ""                     # launch 인자 model_path 로 전달 (.urdf 또는 MJCF .xml)
+    package_dirs: [""]                 # URDF 메시 package:// 해석 경로 (자기충돌 사용 시)
+    srdf_path: ""                      # 충돌쌍 제외 SRDF (선택, URDF만)
+    base_frame: pelvis                 # 디버그 PoseStamped frame_id = 모델 루트 링크 (G1: pelvis)
+    forward_axis: [1.0, 0.0, 0.0]              # 베이스 프레임의 '정면' 방향 (검사·mock 입력용)
+
+    # ---- 로봇 ----
+    controlled_joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - left_wrist_yaw_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+      - right_wrist_yaw_joint
+    left_hand_frame: left_wrist_yaw_link
+    right_hand_frame: right_wrist_yaw_link
+    # 영공간 자세 목표 = 준비 자세 (controlled_joints 순서, rad).
+    # G1 주의: 팔꿈치는 0 이 90° 굽힘, +가 펴짐(1.28 ≈ 팔을 곧게 내림), −가 더 굽힘. 어깨 pitch 는 −가 앞으로 듦. roll 은 왼쪽 +/오른쪽 − 가 바깥쪽.
+    # [−0.2, 0.25, 0, −0.6]: 손이 어깨 앞 19 cm·5 cm 아래 (팔 길이 0.38 m 의 중간) → 여섯 방향 ±8 cm 모두 2 mm 안에서 도달, 최소 간격 66 mm
+    nominal_posture: [-0.2, 0.25, 0.0, -0.6, 0.0, 0.0, 0.0,
+                      -0.2, -0.25, 0.0, -0.6, 0.0, 0.0, 0.0]
+
+    # ---- IK ----
+    control_rate: 100.0
+    solver: ""                         # 비우면 quadprog 우선 자동 선택
+    position_cost: 1.0
+    orientation_cost: 0.3              # 위치보다 낮게 (손목 한계에서 위치를 우선)
+    task_gain: 0.5                     # 0~1, 높을수록 빠르고 딱딱
+    lm_damping: 1.0e-3                 # 특이점 근처 감쇠
+    posture_cost: 0.01                 # ↑팔꿈치 자연스러움 / ↓손 정상상태 오차 (0.01: ~3 mm, 0.05: ~1 cm)
+    damping: 1.0e-6
+    max_joint_velocity: 2.0            # rad/s (모델에 한계가 없으면 이 값)
+
+    # ---- 매핑·필터 ----
+    translation_scale: 0.6             # = G1 팔 0.38 m(어깨→손목) / 조작자 어깨→손바닥 0.63 m. 조작자가 작으면(0.55 m) 0.68. launch operator_arm:=<m> 으로 자동
+    max_step: 0.03                     # 한 주기 최대 목표 이동 [m]
+    quest_yaw_offset_deg: 0.0          # 입력 전방 ↔ 로봇 전방 요 정렬. xr_teleop 은 launch 가 forward_axis 로 자동 설정 (G1 0, SH 90)
+    filter_min_cutoff: 1.5             # One-Euro: 낮을수록 부드럽고 느림
+    filter_beta: 0.5                   # One-Euro: 빠른 동작 지연 감소
+    orientation_filter_alpha: 0.3      # slerp 저역통과 (1.0 = 필터 없음)
+    input_timeout: 0.5                 # s, 입력이 끊기면 자동 해제·정지
+    stop_on_release: true              # 해제 시 현재 자세에서 즉시 정지
+
+    # ---- 자기충돌 ----
+    enable_self_collision: true        # MJCF/URDF 충돌형상 사용. 메시는 convex hull 로 자동 변환
+    collision_d_min: 0.03              # 유지할 최소 간격 [m]
+    collision_gain: 0.3                # 한 스텝에 (d - d_min)의 몇 배까지 접근 허용 (작을수록 보수적)
+    collision_activation: 0.08         # 이 거리 안의 쌍만 제약으로 추가
+    collision_convex_hull: true
+    collision_exclude_links: ['*_hand_*_link']   # g1_with_hands.xml 의 손가락 링크 14개는 자기충돌에서 제외 (853쌍→팔·몸통만; 손바닥은 wrist_yaw 에 포함되어 유지)
+
+    # ---- I/O ----
+    init_from_joint_states: true       # 시작 시 /joint_states 로 내부 q 동기화 (점프 방지)
+    joint_states_topic: /joint_states
+    output_mode: trajectory            # trajectory | forward_position | upper_body | joint_state
+    output_split: false                # true 면 팔별 7축으로 left_*/right_* 토픽에 발행
+    trajectory_topic: /arm_controller/joint_trajectory
+    forward_position_topic: /forward_position_controller/commands
+    joint_state_out_topic: /quest_ik/joint_states
+
+mujoco_sim:
+  ros__parameters:
+    model_path: ""                     # launch 인자 sim_model_path (기본 = model_path) 로 전달
+    keyframe: stand                    # 초기 자세 키프레임 (없으면 빈 문자열)
+    fix_base: true                     # free joint(전신 모델)를 공중에 고정 — 상반신만 검증
+    base_height: -1.0                  # <0 이면 키프레임 높이 유지
+    controlled_joints:                 # dual_arm_ik 와 같은 14개, 같은 순서
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - left_wrist_yaw_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+      - right_wrist_yaw_joint
+    viewer: true                       # launch 의 viewer:= 가 덮어씀
+    initial_posture: [0.2, 0.35, 0.0, 1.28, 0.0, 0.0, 0.0, 0.2, -0.35, 0.0, 1.28, 0.0, 0.0, 0.0]   # 시작 자세 = 팔을 옆으로 내린 자세 (stand 키프레임에서 어깨 roll 만 0.2→0.35: Dex3 엄지가 허벅지에 닿지 않게 25 mm 여유)
+                                       # 조작자도 팔을 내린 채 그립을 쥐고 시작하면 된다. 손을 앞으로 든 자세로 시작하려면 nominal_posture 와 같게 [-0.2,0.25,0,-0.6,0,0,0, …]
+    forward_axis: [1.0, 0.0, 0.0]      # 뷰어 카메라를 로봇 뒤에 놓기 위한 정면 방향 (launch 가 덮어씀)
+    viewer_view: behind                # behind | front | default
+    realtime: 1.0
+    publish_rate: 100.0
+    joint_states_topic: /joint_states
+    trajectory_topic: /arm_controller/joint_trajectory
+    forward_position_topic: /forward_position_controller/commands
+
+# 손 쥐기: 컨트롤러 검지 트리거(앞쪽 버튼) 0~1 → /teleop/{side}_hand/grasp → 손가락 관절 목표 /teleop/hand_joint_targets (JointState).
+# mujoco_sim 이 그 관절을 움직이고, 실기체는 Dex3 드라이버가 같은 토픽을 받으면 된다. 관절 이름은 G1 Dex3-1 (g1_with_hands.xml / dex3_hand.xacro) 공통.
+hand_grasp:
+  ros__parameters:
+    rate: 50.0
+    tau: 0.1                           # s, 트리거 저역통과 (쥐기/펴기가 이 시정수로 부드럽게)
+    targets_topic: /teleop/hand_joint_targets
+    hand_joints_yaml: |                # {side: {joint: [열림, 쥠]}} — Dex3-1 관절 범위 안 (왼손 검지·중지 −, 엄지 +; 오른손 반대). 열림은 살짝 오므린 자연스러운 자세
+      left:
+        left_hand_thumb_0_joint:  [0.0,  0.0]
+        left_hand_thumb_1_joint:  [0.6,  1.0]
+        left_hand_thumb_2_joint:  [0.4,  1.2]
+        left_hand_index_0_joint:  [-0.2, -1.3]
+        left_hand_index_1_joint:  [-0.3, -1.5]
+        left_hand_middle_0_joint: [-0.2, -1.3]
+        left_hand_middle_1_joint: [-0.3, -1.5]
+      right:
+        right_hand_thumb_0_joint:  [0.0,  0.0]
+        right_hand_thumb_1_joint:  [-0.6, -1.0]
+        right_hand_thumb_2_joint:  [-0.4, -1.2]
+        right_hand_index_0_joint:  [0.2,  1.3]
+        right_hand_index_1_joint:  [0.3,  1.5]
+        right_hand_middle_0_joint: [0.2,  1.3]
+        right_hand_middle_1_joint: [0.3,  1.5]

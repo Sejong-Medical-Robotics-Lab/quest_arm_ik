@@ -1,0 +1,30 @@
+# quest_arm_ik (pink/Pinocchio IK + MuJoCo) + Isaac ROS Teleop (Quest 3 / CloudXR) 의존성 레이어.
+# Isaac ROS 개발 컨테이너는 재부팅·재생성마다 이미지에서 새로 만들어지므로(컨테이너 안 apt/pip 설치는 소실),
+# 필요한 패키지를 이미지에 굽는다. 등록: scripts/setup_persistent.sh (호스트) → isaac-ros activate --build-local
+# 키 이름을 zz_ 로 시작시켜 다른 레이어(realsense, zed 등)보다 뒤에 쌓이게 한다 (앞 레이어 캐시 무효화 방지).
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+# 베이스 이미지에 ROS_DISTRO 가 ENV 로 없을 수 있으므로(빌드 시 "${ROS_DISTRO:?}" 검사는 exit 127 로 실패) 기본값을 준다.
+ARG ROS_DISTRO=jazzy
+
+# ros-jazzy-isaac-ros-teleop → python3-isaacteleop-pip-shim 이 isaacteleop 1.3.x, dex_retargeting 0.4.6, pinocchio(pin) 2.7.0,
+# numpy 1.26, torch 등을 시스템 사이트(/usr/local)에 pip 로 넣는다. 이 스택은 건드리지 않는다.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3-pip python3-venv python3-dev iputils-ping iproute2 "ros-${ROS_DISTRO}-rosidl-default-generators" \
+        "ros-${ROS_DISTRO}-isaac-ros-teleop" \
+        libgl1 libglx0 libglvnd0 libglx-mesa0 libgl1-mesa-dri libegl1
+
+# quest_arm_ik 의존성은 전용 venv(/opt/quest_py)에 둔다.
+#  - 시스템 사이트의 pin 2.7.0(NVIDIA 용)과 우리가 쓰는 pin 3.x 는 같은 배포 이름이라 한 사이트에 공존할 수 없고,
+#    pin 을 올리면 NVIDIA 노드(dex_retargeting 0.4.6 / numpy 1.26)가 깨진다.
+#  - launch(teleop.launch.py)가 우리 노드를 이 인터프리터로 실행한다(환경변수 QPY, scripts/env.sh). rclpy 등 ROS 패키지는
+#    setup.bash 의 PYTHONPATH 로 들어오므로 venv 에 시스템 사이트를 포함시키지 않는다(두 pinocchio 가 섞이지 않게).
+#  - cmeel-urdfdom<5 / cmeel-tinyxml2<11: pin 3.x 바이너리가 링크한 soname(liburdfdom*.so.4, libtinyxml2.so.10) 유지.
+#    (urdfdom 6 은 tinyxml2 버전을 명시하지 않아 섞이면 "ImportError: libtinyxml2.so.11" — NVIDIA IsaacTeleop requirements 와 같은 캡)
+RUN python3 -m venv /opt/quest_py \
+ && /opt/quest_py/bin/python -m pip install --no-cache-dir "setuptools" \
+        "pin>=3.3" "pin-pink>=3.1" "cmeel-urdfdom<5" "cmeel-tinyxml2<11" \
+        "qpsolvers>=4.3" "quadprog>=0.1.12" "mujoco>=3.2" "msgpack>=1.0" "pyyaml>=6.0" "xacro>=2.0" "numpy>=1.24" \
+ && /opt/quest_py/bin/python -c "import pinocchio, coal, pink, qpsolvers, quadprog, mujoco, msgpack, yaml, xacro, numpy; print('quest_arm_ik deps ok: pin', pinocchio.__version__, 'pink', pink.__version__, 'mujoco', mujoco.__version__, 'numpy', numpy.__version__, 'solvers', qpsolvers.available_solvers)" \
+ && python3 -c "import isaacteleop.cloudxr, dex_retargeting.retargeting_config, pinocchio; print('isaac_ros_teleop deps ok (system pin', pinocchio.__version__ + ')')"
